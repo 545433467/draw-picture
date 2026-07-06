@@ -72,7 +72,7 @@ SERVICE_STYLE = {
 }
 
 # 这些类型作为 compound 容器节点（自动生成，不直接来自行数据）
-_VIRTUAL_CONTAINER_TYPES = {"__region__", "__group__"}
+_VIRTUAL_CONTAINER_TYPES = {"__region__", "__group__", "__business__"}
 
 # 连接关系 → 确认边颜色
 RELATION_COLORS = {
@@ -112,6 +112,8 @@ COL_ALIASES = {
                      "推断下游", "inferred downstream"],
     "推断原因":     ["推断原因", "inference_reason", "reason", "推断依据",
                      "infer_reason"],
+    "所属业务":     ["所属业务", "业务", "business", "business_name",
+                     "app_name", "application", "所属应用", "业务域", "app"],
 }
 
 
@@ -169,6 +171,7 @@ def read_excel(filepath):
             "enterprise_id":   get("企业项目ID"),
             "region":          get("区域"),
             "group":           get("资源分组"),
+            "business":        get("所属业务"),
             "desc":            get("描述"),
             "spec":            get("规格"),
             "targets":         get("下游服务"),
@@ -203,8 +206,9 @@ def build_graph(records):
         stype = r["type"] or "default"
         bg, border, shape = SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
 
-        reg = (r["region"] or "").strip()
-        grp = (r["group"]  or "").strip()
+        reg = (r["region"]   or "").strip()
+        grp = (r["group"]    or "").strip()
+        biz = (r["business"] or "").strip()
 
         d = {
             "id":            nid,
@@ -216,6 +220,7 @@ def build_graph(records):
             "enterprise_id": r["enterprise_id"],
             "region":        reg,
             "group_label":   grp,
+            "business":      biz,
             "reason":        r["reason"],
             "bg_color":      bg,
             "border_color":  border,
@@ -223,6 +228,36 @@ def build_graph(records):
             "is_container":  0,
         }
         nodes.append({"group": "nodes", "data": d})
+
+    # ── 2. 创建业务容器节点，为叶节点设置 parent ─────────────────────────
+
+    business_map = {}   # biz_name → biz_id（用计数器生成唯一ID，避免中文被safe_id转成相同下划线）
+    _biz_counter = 0
+    for n in nodes:
+        biz = n["data"].get("business", "").strip()
+        if not biz:
+            continue
+        if biz not in business_map:
+            business_map[biz] = f"biz_{_biz_counter}"
+            _biz_counter += 1
+        n["data"]["parent"] = business_map[biz]
+
+    biz_containers = []
+    for biz_name, biz_id in business_map.items():
+        biz_containers.append({"group": "nodes", "data": {
+            "id":           biz_id,
+            "name":         biz_name,
+            "type":         "__business__",
+            "is_container": 1,
+            "bg_color":     "#E8F8F5",
+            "border_color": "#1ABC9C",
+            "shape":        "roundrectangle",
+        }})
+    nodes = biz_containers + nodes
+
+    # 建立 node_id → business 的映射，供跨业务边标记用
+    node_biz_map = {n["data"]["id"]: n["data"].get("business", "")
+                    for n in nodes if not n["data"].get("is_container")}
 
     # ── 3. 解析外部节点（targets 中不存在的名称）─────────────────────────
 
@@ -258,15 +293,21 @@ def build_graph(records):
         color = RELATION_COLORS.get(relation, RELATION_COLORS["default"])
         if inferred:
             color = "#AAAAAA"
+        src_biz = node_biz_map.get(src_id, "")
+        tgt_biz = node_biz_map.get(tgt_id, "")
+        cross_biz = 1 if (src_biz and tgt_biz and src_biz != tgt_biz) else 0
+        if cross_biz and not inferred:
+            color = "#E67E22"
         eid = f"e_{edge_count[0]}"
         edge_count[0] += 1
         edges.append({"group": "edges", "data": {
-            "id":       eid,
-            "source":   src_id,
-            "target":   tgt_id,
-            "relation": relation + ("（推断）" if inferred else ""),
-            "color":    color,
-            "inferred": 1 if inferred else 0,
+            "id":            eid,
+            "source":        src_id,
+            "target":        tgt_id,
+            "relation":      relation + ("（推断）" if inferred else ""),
+            "color":         color,
+            "inferred":      1 if inferred else 0,
+            "cross_business": cross_biz,
         }})
 
     for r in records:
@@ -429,11 +470,40 @@ def _make_cytoscape_style():
         {"selector": ".highlighted", "style": {
             "border-color": "#E74C3C", "border-width": 3,
         }},
+        # 业务容器节点
+        {
+            "selector": "node[type = '__business__']",
+            "style": {
+                "border-color": "#1ABC9C",
+                "border-width": 2,
+                "border-style": "solid",
+                "background-color": "#E8F8F5",
+                "background-opacity": 0.18,
+                "font-size": 14,
+                "font-weight": "bold",
+                "color": "#0E6655",
+                "text-background-color": "#fff",
+                "text-background-opacity": 0.9,
+                "padding": "30px",
+            }
+        },
+        # 跨业务确认边：橙色粗实线
+        {
+            "selector": "edge[cross_business = 1][inferred = 0]",
+            "style": {
+                "line-color": "#E67E22",
+                "target-arrow-color": "#E67E22",
+                "width": 2.5,
+                "line-style": "dashed",
+                "line-dash-pattern": [10, 4],
+                "opacity": 0.9,
+            }
+        },
     ]
 
 
 def _make_legend_html():
-    exclude = {"__region__", "__group__"}
+    exclude = {"__region__", "__group__", "__business__"}
     items = []
     for stype, (bg, border, shape) in SERVICE_STYLE.items():
         if stype in exclude:
@@ -470,7 +540,7 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
 
     # 统计数字
     n_nodes = sum(1 for e in elements if e.get("group") == "nodes"
-                  and e["data"].get("type") not in ("__region__", "__group__"))
+                  and e["data"].get("type") not in ("__region__", "__group__", "__business__"))
     n_edges = sum(1 for e in elements if e.get("group") == "edges")
     n_infer = sum(1 for e in elements if e.get("group") == "edges"
                   and e["data"].get("inferred") == 1)
@@ -547,6 +617,8 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <button class="tb-btn" onclick="resetView()">&#8635; 复位</button>
   <button class="tb-btn" onclick="exportPng()">&#128247; 导出图片</button>
   <div class="sep"></div>
+  <button id="bizToggleBtn" class="tb-btn" onclick="toggleBusinessView()" style="background:rgba(26,188,156,.35)">&#127968; 业务分组:开</button>
+  <div class="sep"></div>
   <select id="layoutSelect" onchange="changeLayout(this.value)">
     {layout_options}
   </select>
@@ -575,6 +647,14 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
       <div class="legend-title">图例</div>
       {legend_html}
       <div class="infer-legend"><span class="infer-line"></span><span>推断连接（虚线）</span></div>
+      <div class="infer-legend">
+        <span style="display:inline-block;width:24px;height:2px;border-top:2px dashed #E67E22;margin-right:6px"></span>
+        <span style="color:#E67E22">跨业务调用</span>
+      </div>
+      <div class="infer-legend">
+        <span style="display:inline-block;width:16px;height:10px;border:2px solid #1ABC9C;background:rgba(26,188,156,.15);border-radius:3px;margin-right:6px"></span>
+        <span>业务分组</span>
+      </div>
     </div>
   </div>
 </div>
@@ -605,7 +685,7 @@ setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
 cy.on('tap', 'node', function(evt) {{
   var d  = evt.target.data();
   var bg = d.bg_color || '#888';
-  if (d.type === '__region__' || d.type === '__group__') {{
+  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__') {{
     showContainerDetail(d);
   }} else {{
     showNodeDetail(d, bg);
@@ -653,6 +733,7 @@ cy.on('tap', function(evt) {{
 function showNodeDetail(d, bg) {{
   var rows = [
     ['资源名称', d.name],
+    ['所属业务', d.business  || '-'],
     ['资源类型', (d.type||'').toUpperCase()],
     ['资源ID',   d.resource_id  || '-'],
     ['企业项目', d.enterprise_id|| '-'],
@@ -675,7 +756,8 @@ function showNodeDetail(d, bg) {{
   // 相邻节点
   var src   = cy.getElementById(d.id);
   var nbrs  = src.neighborhood().nodes().filter(function(n) {{
-    return n.data('type') !== '__region__' && n.data('type') !== '__group__';
+    var t = n.data('type');
+    return t !== '__region__' && t !== '__group__' && t !== '__business__';
   }});
   if (nbrs.length > 0) {{
     html += '<div class="d-row"><div class="d-label">相邻节点</div><div class="d-value">';
@@ -693,7 +775,10 @@ function showNodeDetail(d, bg) {{
 }}
 
 function showContainerDetail(d) {{
-  var label = d.type === '__region__' ? '区域' : '资源分组';
+  var label = d.type === '__region__' ? '区域'
+            : d.type === '__business__' ? '所属业务'
+            : '资源分组';
+  var tagColor = d.type === '__business__' ? '#1ABC9C' : '#2E86C1';
   var html = '<div class="d-row"><div class="d-label">'+label+'</div>' +
              '<div class="d-value">'+escHtml(d.name)+'</div></div>';
   var children = cy.getElementById(d.id).descendants().filter(function(n) {{
@@ -708,7 +793,7 @@ function showContainerDetail(d) {{
   html += '</div></div>';
   document.getElementById('detail-panel').innerHTML = html;
   document.getElementById('node-type-tag').innerHTML =
-    '<span class="tag" style="background:#2E86C1">'+label+'</span>';
+    '<span class="tag" style="background:'+tagColor+'">'+label+'</span>';
 }}
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────
@@ -743,7 +828,8 @@ function searchNodes(q) {{
     return (d.name||'').toLowerCase().includes(q)
         || (d.type||'').toLowerCase().includes(q)
         || (d.resource_id||'').toLowerCase().includes(q)
-        || (d.group_label||'').toLowerCase().includes(q);
+        || (d.group_label||'').toLowerCase().includes(q)
+        || (d.business||'').toLowerCase().includes(q);
   }});
   matched.removeClass('faded').addClass('highlighted');
   matched.neighborhood().removeClass('faded');
@@ -753,6 +839,35 @@ function searchNodes(q) {{
   }} else {{
     showToast('未找到匹配节点');
   }}
+}}
+
+var _bizViewOn = true;
+var _origParents = {{}};
+
+function toggleBusinessView() {{
+  _bizViewOn = !_bizViewOn;
+  var btn = document.getElementById('bizToggleBtn');
+  if (!_bizViewOn) {{
+    cy.nodes().forEach(function(n) {{
+      var p = n.data('parent');
+      if (p && p.indexOf('biz_') === 0) {{
+        _origParents[n.id()] = p;
+        n.move({{ parent: null }});
+      }}
+    }});
+    cy.nodes('[type = "__business__"]').style('display', 'none');
+    btn.innerHTML = '&#127968; 业务分组:关';
+    btn.style.background = 'rgba(255,255,255,.15)';
+  }} else {{
+    cy.nodes('[type = "__business__"]').style('display', 'element');
+    Object.keys(_origParents).forEach(function(nid) {{
+      cy.getElementById(nid).move({{ parent: _origParents[nid] }});
+    }});
+    _origParents = {{}};
+    btn.innerHTML = '&#127968; 业务分组:开';
+    btn.style.background = 'rgba(26,188,156,.35)';
+  }}
+  cy.fit(undefined, 50);
 }}
 
 function focusNode(id) {{
