@@ -99,7 +99,7 @@ Region（区域容器，蓝色虚线框）
 | 滚轮 | 缩放 |
 | 拖拽 | 平移 |
 | 搜索框 | 按名称/类型/ID/分组过滤节点 |
-| 布局切换 | cose-bilkent（推荐）/ 层次 / 网格 / 圆形 |
+| 布局切换 | cose（默认内置）/ cose-bilkent（可选插件）/ 层次 / 网格 / 圆形 |
 | 导出图片 | 导出为 PNG（2× 分辨率） |
 
 ---
@@ -135,11 +135,29 @@ ourresult/
 
 引擎文件（由 `converter.py` 自动读取，无需手动操作）：
 ```
-../cytoscape.js-unstable/dist/cytoscape.min.js     # 核心渲染引擎
-../cloudmapper-main/web/js/cytoscape-cose-bilkent.js  # 布局算法
+../cloudmapper-main/web/js/cytoscape.min.js           # 核心渲染引擎（优先，与插件版本兼容）
+../cloudmapper-main/web/js/cytoscape-cose-bilkent.js  # cose-bilkent 布局算法
 ../cloudmapper-main/web/js/dagre.js                   # 层次布局依赖
 ../cloudmapper-main/web/js/cytoscape-dagre.js         # Dagre 布局
+../cytoscape.js-unstable/dist/cytoscape.min.js        # 备用渲染引擎
 ```
+
+> **注意**：`cloudmapper-main/web/js/cytoscape.min.js` 与同目录的插件（cose-bilkent、dagre）版本匹配。
+> 若擅自替换为其他版本的 cytoscape.min.js，可能导致拓扑图节点不显示（布局插件不兼容）。
+
+---
+
+## 常见问题
+
+### 网页打开后没有节点显示
+
+**原因**：cytoscape.js 与布局插件（cose-bilkent）版本不兼容，布局计算失败导致节点无坐标。
+
+**已内置的解决方案**：`converter.py` 已按以下策略处理：
+1. 优先加载与插件版本匹配的 `cloudmapper-main/web/js/cytoscape.min.js`
+2. 生成的 HTML 中布局调用带有 `try/catch`，若 `cose-bilkent` 失败会自动回退到内置 `cose` 布局
+
+**如果仍然不显示**：切换布局选择框中的其他选项（如"层次布局"或"网格布局"），确认节点是否存在。
 
 ---
 

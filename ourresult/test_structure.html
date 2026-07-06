@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:sans-serif;background:#f4f6fb;height:100vh;overflow:hidden;display:flex;flex-direction:column}
+#toolbar{display:flex;align-items:center;gap:8px;padding:6px 14px;
+  background:#1A237E;color:#fff;flex-shrink:0;height:50px}
+#toolbar h1{font-size:15px}
+#main{display:flex;flex:1;min-height:0}
+#cy{flex:1;min-height:0;background:#fff}
+#sidebar{width:280px;flex-shrink:0;background:#f9f9f9;border-left:1px solid #ddd;padding:10px}
+</style>
+</head>
+<body>
+<div id="toolbar"><h1 id="status">正在加载...</h1></div>
+<div id="main">
+  <div id="cy"></div>
+  <div id="sidebar">侧边栏</div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.21.0/cytoscape.min.js"></script>
+<script>
+// 先用网络版 cytoscape 确认结构是否正确
+var status = document.getElementById('status');
+if (typeof cytoscape === 'undefined') {
+  status.textContent = '网络版 cytoscape 未加载（离线环境）';
+} else {
+  var cy_div = document.getElementById('cy');
+  cy_div.style.height = (window.innerHeight - 50) + 'px';
+  var cy = cytoscape({
+    container: cy_div,
+    elements: [
+      {data:{id:'a',label:'节点A'}},
+      {data:{id:'b',label:'节点B'}},
+      {data:{id:'ab',source:'a',target:'b'}}
+    ],
+    style:[{selector:'node',style:{'background-color':'#6FB1FC','label':'data(label)'}},
+           {selector:'edge',style:{'line-color':'#ccc'}}],
+    layout:{name:'cose',animate:false}
+  });
+  status.textContent = '节点=' + cy.nodes().length + ' 容器高=' + cy_div.offsetHeight + 'px  [网络版cytoscape]';
+}
+</script>
+</body>
+</html>

@@ -193,49 +193,10 @@ def build_graph(records):
     node_id_map = {}   # resource_name → node_id
     edge_count = [0]
 
-    # ── 1. 收集所有 region / group 组合，生成虚拟容器节点 ──────────────────
-
-    regions = {}   # region_label → region_node_id
-    groups  = {}   # (region_label, group_label) → group_node_id
-
-    for r in records:
-        reg = (r["region"] or "").strip()
-        grp = (r["group"]  or "").strip()
-        if reg and reg not in regions:
-            rid = f"__region__{safe_id(reg)}"
-            regions[reg] = rid
-            nodes.append({"group": "nodes", "data": {
-                "id": rid, "name": reg,
-                "type": "__region__", "is_container": 1,
-                "bg_color": "#EBF5FB", "border_color": "#2E86C1",
-                "shape": "roundrectangle",
-                "spec": "", "desc": "区域",
-                "resource_id": "", "enterprise_id": "",
-                "region": "", "group_label": "",
-            }})
-        if grp:
-            key = (reg, grp)
-            if key not in groups:
-                gid = f"__group__{safe_id(reg)}_{safe_id(grp)}"
-                groups[key] = gid
-                g_data = {
-                    "id": gid, "name": grp,
-                    "type": "__group__", "is_container": 1,
-                    "bg_color": "#F9F9F9", "border_color": "#AAB7B8",
-                    "shape": "roundrectangle",
-                    "spec": "", "desc": "资源分组",
-                    "resource_id": "", "enterprise_id": "",
-                    "region": reg, "group_label": grp,
-                }
-                if reg in regions:
-                    g_data["parent"] = regions[reg]
-                nodes.append({"group": "nodes", "data": g_data})
-
-    # ── 2. 创建资源叶节点 ──────────────────────────────────────────────────
+    # ── 1. 创建资源叶节点 ──────────────────────────────────────────────────
 
     for i, r in enumerate(records):
         nid = f"n_{safe_id(r['name'])}_{i}"
-        # 同名资源只保留首个 id（边引用时查名字）
         if r["name"] not in node_id_map:
             node_id_map[r["name"]] = nid
 
@@ -261,13 +222,6 @@ def build_graph(records):
             "shape":         shape,
             "is_container":  0,
         }
-
-        # 设置父节点：优先 group，其次 region
-        if grp and (reg, grp) in groups:
-            d["parent"] = groups[(reg, grp)]
-        elif reg in regions:
-            d["parent"] = regions[reg]
-
         nodes.append({"group": "nodes", "data": d})
 
     # ── 3. 解析外部节点（targets 中不存在的名称）─────────────────────────
@@ -337,6 +291,8 @@ def build_graph(records):
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CYTOSCAPE_PATHS = [
+    # 优先使用与 cose-bilkent 插件版本匹配的稳定版
+    os.path.join(_SCRIPT_DIR, "..", "cloudmapper-main", "web", "js", "cytoscape.min.js"),
     os.path.join(_SCRIPT_DIR, "..", "cytoscape.js-unstable", "dist", "cytoscape.min.js"),
     os.path.join(_SCRIPT_DIR, "js", "cytoscape.min.js"),
 ]
@@ -494,35 +450,23 @@ def _make_legend_html():
 
 
 def generate_html(elements, title="云服务拓扑图", output_path="topology.html"):
-    cytoscape_js    = _read_first(_CYTOSCAPE_PATHS)
-    cose_bilkent    = _read_first(_COSE_BILKENT_PATHS)
-    dagre_js        = _read_first(_DAGRE_PATHS)
-    cytoscape_dagre = _read_first(_CYTOSCAPE_DAGRE_PATHS)
+    cytoscape_js = _read_first(_CYTOSCAPE_PATHS)
 
     if not cytoscape_js:
         sys.exit("找不到 cytoscape.min.js，请确认路径:\n" + "\n".join(_CYTOSCAPE_PATHS))
 
-    elements_json = json.dumps(elements, ensure_ascii=False, indent=2)
-    style_json    = json.dumps(_make_cytoscape_style(), ensure_ascii=False)
+    # ensure_ascii=True：将中文转为 \uXXXX 转义，避免内联 JS 中出现非 ASCII 字符导致的解析问题
+    elements_json = json.dumps(elements, ensure_ascii=True)
+    style_json    = json.dumps(_make_cytoscape_style(), ensure_ascii=True)
     legend_html   = _make_legend_html()
-    has_cose      = bool(cose_bilkent)
-    has_dagre     = bool(dagre_js and cytoscape_dagre)
-    default_layout = "cose-bilkent" if has_cose else "cose"
 
-    # 各布局 option 标签
-    layout_options = f'<option value="{default_layout}">{default_layout} 布局（推荐）</option>\n'
-    layout_options += '    <option value="breadthfirst">层次布局</option>\n'
+    # 只使用内置布局，不依赖外部插件（cloudmapper cytoscape 无 cose，须使用内置布局）
+    layout_options  = '<option value="breadthfirst">层次布局（推荐）</option>\n'
     layout_options += '    <option value="grid">网格布局</option>\n'
     layout_options += '    <option value="circle">圆形布局</option>\n'
-    if has_dagre:
-        layout_options += '    <option value="dagre">Dagre 布局</option>\n'
-
-    extra_scripts = ""
-    if has_cose:
-        extra_scripts += f"<script>{cose_bilkent}</script>\n"
-    if has_dagre:
-        extra_scripts += f"<script>{dagre_js}</script>\n"
-        extra_scripts += f"<script>{cytoscape_dagre}</script>\n"
+    layout_options += '    <option value="concentric">同心圆布局</option>\n'
+    layout_options += '    <option value="random">随机布局</option>\n'
+    default_layout  = "breadthfirst"
 
     # 统计数字
     n_nodes = sum(1 for e in elements if e.get("group") == "nodes"
@@ -562,11 +506,10 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 .stat-item{{display:flex;align-items:center;gap:4px}}
 .stat-dot{{width:8px;height:8px;border-radius:50%;display:inline-block}}
 /* ── 主区域 ── */
-#main{{display:flex;flex:1;overflow:hidden}}
-#cy{{flex:1;background:#fff}}
+#cy{{position:fixed;top:50px;left:0;right:280px;bottom:0;background:#fff}}
 /* ── 侧边栏 ── */
-#sidebar{{width:280px;flex-shrink:0;background:#fff;border-left:1px solid #e0e0e0;
-  display:flex;flex-direction:column;overflow:hidden}}
+#sidebar{{position:fixed;top:50px;right:0;width:280px;bottom:0;background:#fff;
+  border-left:1px solid #e0e0e0;display:flex;flex-direction:column;overflow:hidden}}
 #sb-header{{padding:10px 14px;background:#E8EAF6;font-weight:700;font-size:13px;
   color:#283593;border-bottom:1px solid #c5cae9;display:flex;
   justify-content:space-between;align-items:center;flex-shrink:0}}
@@ -617,9 +560,8 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   </div>
 </div>
 
-<div id="main">
-  <div id="cy"></div>
-  <div id="sidebar">
+<div id="cy"></div>
+<div id="sidebar">
     <div id="sb-header">
       <span>节点 / 边 详情</span>
       <span id="node-type-tag"></span>
@@ -639,7 +581,6 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 <div id="toast"></div>
 
 <script>{cytoscape_js}</script>
-{extra_scripts}
 <script>
 var elements   = {elements_json};
 var styleRules = {style_json};
@@ -650,7 +591,6 @@ var cy = cytoscape({{
   style:     styleRules,
   layout: {{
     name: '{default_layout}',
-    nodeDimensionsIncludeLabels: true,
     animate: false,
     padding: 50,
   }},
@@ -658,6 +598,8 @@ var cy = cytoscape({{
   minZoom: 0.05,
   maxZoom: 6,
 }});
+
+setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
 
 // ── 事件：点击节点 ─────────────────────────────────────────────────────────
 cy.on('tap', 'node', function(evt) {{
@@ -740,7 +682,7 @@ function showNodeDetail(d, bg) {{
     nbrs.forEach(function(n) {{
       html += '<span style="display:inline-block;margin:2px 2px 0 0;padding:2px 6px;' +
               'background:#E8EAF6;border-radius:4px;font-size:11px;cursor:pointer" ' +
-              'onclick="focusNode(\''+n.id()+'\')">'+escHtml(n.data('name'))+'</span>';
+              'onclick="focusNode(\\''+n.id()+'\\')" >'+escHtml(n.data('name'))+'</span>';
     }});
     html += '</div></div>';
   }}
@@ -761,7 +703,7 @@ function showContainerDetail(d) {{
   children.forEach(function(n) {{
     html += '<span style="display:inline-block;margin:2px 2px 0 0;padding:2px 6px;' +
             'background:#E8EAF6;border-radius:4px;font-size:11px;cursor:pointer" ' +
-            'onclick="focusNode(\''+n.id()+'\')">'+escHtml(n.data('name'))+'</span>';
+            'onclick="focusNode(\\''+n.id()+'\\')" >'+escHtml(n.data('name'))+'</span>';
   }});
   html += '</div></div>';
   document.getElementById('detail-panel').innerHTML = html;
@@ -788,7 +730,7 @@ function exportPng() {{
 function changeLayout(name) {{
   var opts = {{ name:name, nodeDimensionsIncludeLabels:true,
                animate:true, animationDuration:600, padding:50 }};
-  if (name === 'cose' || name === 'cose-bilkent') opts.randomize = false;
+  if (name === 'breadthfirst') opts.directed = true;
   cy.layout(opts).run();
 }}
 
