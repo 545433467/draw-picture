@@ -75,6 +75,18 @@ SERVICE_STYLE = {
 # 这些类型作为 compound 容器节点（自动生成，不直接来自行数据）
 _VIRTUAL_CONTAINER_TYPES = {"__region__", "__group__", "__business__"}
 
+# 业务容器的调色板（背景, 边框, 标题色）——按顺序循环分配给各业务
+BUSINESS_PALETTE = [
+    ("#E8F8F5", "#1ABC9C", "#0E6655"),   # 青绿
+    ("#FEF9E7", "#F1C40F", "#7D6608"),   # 明黄
+    ("#FDEDEC", "#E74C3C", "#922B21"),   # 珊瑚红
+    ("#EBF5FB", "#3498DB", "#1A5276"),   # 天蓝
+    ("#F4ECF7", "#9B59B6", "#5B2C6F"),   # 紫罗兰
+    ("#FDF2E9", "#E67E22", "#7E5109"),   # 琥珀橙
+    ("#EAFAF1", "#27AE60", "#186A3B"),   # 森林绿
+    ("#F2F3F4", "#5D6D7E", "#2E4053"),   # 石墨灰
+]
+
 # 连接关系 → 确认边颜色
 RELATION_COLORS = {
     "调用":     "#3498DB",
@@ -244,14 +256,16 @@ def build_graph(records):
         n["data"]["parent"] = business_map[biz]
 
     biz_containers = []
-    for biz_name, biz_id in business_map.items():
+    for i, (biz_name, biz_id) in enumerate(business_map.items()):
+        bg, border, text = BUSINESS_PALETTE[i % len(BUSINESS_PALETTE)]
         biz_containers.append({"group": "nodes", "data": {
             "id":           biz_id,
             "name":         biz_name,
             "type":         "__business__",
             "is_container": 1,
-            "bg_color":     "#E8F8F5",
-            "border_color": "#1ABC9C",
+            "bg_color":     bg,
+            "border_color": border,
+            "text_color":   text,
             "shape":        "roundrectangle",
         }})
     nodes = biz_containers + nodes
@@ -334,12 +348,12 @@ def compute_bdat_positions(elements):
     - 同层节点水平均匀分布
     返回 {node_id: {'x': float, 'y': float}}
     """
-    NODE_W    = 130   # 同层节点水平间距
-    NODE_H    = 170   # 层间垂直间距
-    GROUP_PAD = 90    # 业务组内边距
-    GAP_X     = 250   # 业务组之间水平间距
-    GAP_Y     = 220   # 业务组之间垂直间距
-    MAX_COLS  = 3     # 网格最大列数
+    NODE_W    = 160   # 同层节点水平间距
+    NODE_H    = 220   # 层间垂直间距（拉大：上下层次感更明显）
+    GROUP_PAD = 110   # 业务组内边距
+    GAP_X     = 450   # 业务组之间水平间距（拉大：业务边界更清晰）
+    GAP_Y     = 380   # 业务组之间垂直间距
+    MAX_COLS  = 2     # 网格最大列数（收窄为 2 列，让每列业务更醒目）
 
     # 收集叶节点和边
     leaf_nodes = {}
@@ -397,12 +411,28 @@ def compute_bdat_positions(elements):
             if n not in layer:
                 layer[n] = 0
 
-        # 整理成 {层号: [节点列表]}，同层节点按名称排序保证确定性
+        # 整理成 {层号: [节点列表]}，先按名称排序保证初始确定性
         layers_dict = defaultdict(list)
         for n, l in layer.items():
             layers_dict[l].append(n)
         for l in layers_dict:
             layers_dict[l].sort()
+
+        # 重心法（barycenter）：让下层节点按上游位置排序，
+        # 使 ECS→ELB 这种链路上，ELB 尽量出现在 ECS 正下方
+        parents = defaultdict(list)
+        for src, tgt in edges_list:
+            if src in nodes_in_group and tgt in nodes_in_group:
+                parents[tgt].append(src)
+
+        sorted_layer_nums = sorted(layers_dict.keys())
+        for _ in range(4):   # 4 轮通常足够收敛
+            for l in sorted_layer_nums[1:]:
+                upper = {nid: i for i, nid in enumerate(layers_dict[l - 1])}
+                def bary(nid, _upper=upper):
+                    ps = [_upper[p] for p in parents.get(nid, []) if p in _upper]
+                    return sum(ps) / len(ps) if ps else float("inf")
+                layers_dict[l].sort(key=lambda n: (bary(n), n))
 
         max_layer        = max(layers_dict.keys()) if layers_dict else 0
         max_per_layer    = max(len(v) for v in layers_dict.values()) if layers_dict else 1
@@ -599,21 +629,25 @@ def _make_cytoscape_style():
         {"selector": ".highlighted", "style": {
             "border-color": "#E74C3C", "border-width": 3,
         }},
-        # 业务容器节点
+        # 业务容器节点：颜色/文字从 data 属性取，各业务组配色互不相同
         {
             "selector": "node[type = '__business__']",
             "style": {
-                "border-color": "#1ABC9C",
-                "border-width": 2,
+                "border-color": "data(border_color)",
+                "border-width": 4,
                 "border-style": "solid",
-                "background-color": "#E8F8F5",
-                "background-opacity": 0.18,
-                "font-size": 14,
+                "background-color": "data(bg_color)",
+                "background-opacity": 0.28,
+                "font-size": 16,
                 "font-weight": "bold",
-                "color": "#0E6655",
+                "color": "data(text_color)",
                 "text-background-color": "#fff",
-                "text-background-opacity": 0.9,
-                "padding": "30px",
+                "text-background-opacity": 0.95,
+                "text-background-padding": "4px",
+                "text-margin-y": -6,
+                "padding": "50px",
+                "shape": "roundrectangle",
+                "corner-radius": "12",
             }
         },
         # 跨业务确认边：橙色粗实线
