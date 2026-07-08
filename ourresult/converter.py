@@ -321,11 +321,6 @@ def build_graph(records):
             for t in [x.strip() for x in r["targets"].split(",") if x.strip()]:
                 add_edge(src_id, t, "调用", inferred=False)
 
-        # 推断下游
-        if r["inferred_targets"]:
-            for t in [x.strip() for x in r["inferred_targets"].split(",") if x.strip()]:
-                add_edge(src_id, t, "调用", inferred=True)
-
     return nodes + edges
 
 
