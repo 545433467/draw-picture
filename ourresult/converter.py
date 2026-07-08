@@ -11,6 +11,7 @@ import sys
 import os
 import re
 import argparse
+from collections import defaultdict, deque
 
 try:
     import openpyxl
@@ -328,6 +329,139 @@ def build_graph(records):
     return nodes + edges
 
 
+# ── BDAT 分组层次布局位置计算 ─────────────────────────────────────────────────
+
+def compute_bdat_positions(elements):
+    """
+    按业务分组（BDAT）计算节点的预设坐标：
+    - 各业务组横向排列成网格
+    - 组内按依赖关系纵向分层（上游在上，下游在下）
+    - 同层节点水平均匀分布
+    返回 {node_id: {'x': float, 'y': float}}
+    """
+    NODE_W    = 130   # 同层节点水平间距
+    NODE_H    = 170   # 层间垂直间距
+    GROUP_PAD = 90    # 业务组内边距
+    GAP_X     = 250   # 业务组之间水平间距
+    GAP_Y     = 220   # 业务组之间垂直间距
+    MAX_COLS  = 3     # 网格最大列数
+
+    # 收集叶节点和边
+    leaf_nodes = {}
+    edges_list = []
+    for e in elements:
+        if e["group"] == "nodes" and not e["data"].get("is_container"):
+            leaf_nodes[e["data"]["id"]] = e["data"]
+        elif e["group"] == "edges":
+            edges_list.append((e["data"]["source"], e["data"]["target"]))
+
+    # 按业务分组
+    biz_groups = defaultdict(list)
+    for nid, data in leaf_nodes.items():
+        biz = (data.get("business") or "").strip() or "__ungrouped__"
+        biz_groups[biz].append(nid)
+
+    sorted_bizs = sorted(biz_groups.keys())
+    n_groups = len(sorted_bizs)
+    cols = min(MAX_COLS, n_groups) if n_groups else 1
+
+    # 对每个业务组做拓扑层次分配（最长路径 BFS）
+    group_layers  = {}   # biz -> {layer_num: [node_ids]}
+    group_sizes   = {}   # biz -> (width, height)
+
+    for biz in sorted_bizs:
+        nodes_in_group = set(biz_groups[biz])
+        in_deg  = defaultdict(int)
+        adj     = defaultdict(list)
+        for src, tgt in edges_list:
+            if src in nodes_in_group and tgt in nodes_in_group:
+                adj[src].append(tgt)
+                in_deg[tgt] += 1
+
+        # 层号 = 从任意根节点到达该节点的最长路径长度
+        layer    = {}
+        rem_deg  = {n: in_deg[n] for n in nodes_in_group}
+        queue    = deque()
+        for n in nodes_in_group:
+            if rem_deg[n] == 0:
+                layer[n] = 0
+                queue.append(n)
+
+        while queue:
+            n = queue.popleft()
+            for nb in adj[n]:
+                new_l = layer[n] + 1
+                if nb not in layer or layer[nb] < new_l:
+                    layer[nb] = new_l
+                rem_deg[nb] -= 1
+                if rem_deg[nb] == 0:
+                    queue.append(nb)
+
+        # 剩余未访问节点（存在环路）回退到第0层
+        for n in nodes_in_group:
+            if n not in layer:
+                layer[n] = 0
+
+        # 整理成 {层号: [节点列表]}，同层节点按名称排序保证确定性
+        layers_dict = defaultdict(list)
+        for n, l in layer.items():
+            layers_dict[l].append(n)
+        for l in layers_dict:
+            layers_dict[l].sort()
+
+        max_layer        = max(layers_dict.keys()) if layers_dict else 0
+        max_per_layer    = max(len(v) for v in layers_dict.values()) if layers_dict else 1
+        group_w          = max_per_layer * NODE_W + 2 * GROUP_PAD
+        group_h          = (max_layer + 1) * NODE_H + 2 * GROUP_PAD
+
+        group_layers[biz] = layers_dict
+        group_sizes[biz]  = (group_w, group_h)
+
+    # 计算网格各列最大宽度、各行最大高度
+    col_w = defaultdict(int)
+    row_h = defaultdict(int)
+    grid_pos = {}
+    for i, biz in enumerate(sorted_bizs):
+        c, r = i % cols, i // cols
+        grid_pos[biz] = (c, r)
+        w, h = group_sizes[biz]
+        col_w[c] = max(col_w[c], w)
+        row_h[r] = max(row_h[r], h)
+
+    max_rows = (n_groups + cols - 1) // cols if n_groups else 1
+
+    col_x = {}
+    x = 0
+    for c in range(cols):
+        col_x[c] = x
+        x += col_w[c] + GAP_X
+
+    row_y = {}
+    y = 0
+    for r in range(max_rows):
+        row_y[r] = y
+        y += row_h.get(r, 0) + GAP_Y
+
+    # 逐节点赋坐标
+    positions = {}
+    for biz in sorted_bizs:
+        c, r       = grid_pos[biz]
+        base_x     = col_x[c] + GROUP_PAD
+        base_y     = row_y[r] + GROUP_PAD
+        content_w  = group_sizes[biz][0] - 2 * GROUP_PAD
+
+        for layer_num, layer_nodes in sorted(group_layers[biz].items()):
+            n         = len(layer_nodes)
+            span      = (n - 1) * NODE_W
+            start_x   = base_x + (content_w - span) / 2
+            y_pos     = base_y + layer_num * NODE_H
+            for j, nid in enumerate(layer_nodes):
+                positions[nid] = {"x": round(start_x + j * NODE_W, 1),
+                                  "y": round(y_pos, 1)}
+
+    return positions
+
+
 # ── HTML 生成辅助 ─────────────────────────────────────────────────────────────
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -525,18 +659,27 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     if not cytoscape_js:
         sys.exit("找不到 cytoscape.min.js，请确认路径:\n" + "\n".join(_CYTOSCAPE_PATHS))
 
+    # 计算 BDAT 分组层次布局坐标并注入节点数据
+    bdat_pos = compute_bdat_positions(elements)
+    for e in elements:
+        if e["group"] == "nodes" and not e["data"].get("is_container"):
+            nid = e["data"]["id"]
+            if nid in bdat_pos:
+                e["data"]["bdat_x"] = bdat_pos[nid]["x"]
+                e["data"]["bdat_y"] = bdat_pos[nid]["y"]
+
     # ensure_ascii=True：将中文转为 \uXXXX 转义，避免内联 JS 中出现非 ASCII 字符导致的解析问题
     elements_json = json.dumps(elements, ensure_ascii=True)
     style_json    = json.dumps(_make_cytoscape_style(), ensure_ascii=True)
     legend_html   = _make_legend_html()
 
-    # 只使用内置布局，不依赖外部插件（cloudmapper cytoscape 无 cose，须使用内置布局）
-    layout_options  = '<option value="breadthfirst">层次布局（推荐）</option>\n'
+    layout_options  = '<option value="bdat">BDAT分组层次布局（推荐）</option>\n'
+    layout_options += '    <option value="breadthfirst">层次布局</option>\n'
     layout_options += '    <option value="grid">网格布局</option>\n'
     layout_options += '    <option value="circle">圆形布局</option>\n'
     layout_options += '    <option value="concentric">同心圆布局</option>\n'
     layout_options += '    <option value="random">随机布局</option>\n'
-    default_layout  = "breadthfirst"
+    default_layout  = "bdat"
 
     # 统计数字
     n_nodes = sum(1 for e in elements if e.get("group") == "nodes"
@@ -670,12 +813,16 @@ var cy = cytoscape({{
   elements:  elements,
   style:     styleRules,
   layout: {{
-    name: '{default_layout}',
+    name: 'preset',
+    positions: function(node) {{
+      var bx = node.data('bdat_x'), by = node.data('bdat_y');
+      return (bx != null) ? {{x: +bx, y: +by}} : undefined;
+    }},
     animate: false,
-    padding: 50,
+    padding: 80,
   }},
   wheelSensitivity: 0.2,
-  minZoom: 0.05,
+  minZoom: 0.02,
   maxZoom: 6,
 }});
 
@@ -813,9 +960,21 @@ function exportPng() {{
 }}
 
 function changeLayout(name) {{
-  var opts = {{ name:name, nodeDimensionsIncludeLabels:true,
-               animate:true, animationDuration:600, padding:50 }};
-  if (name === 'breadthfirst') opts.directed = true;
+  var opts;
+  if (name === 'bdat') {{
+    opts = {{
+      name: 'preset',
+      positions: function(node) {{
+        var bx = node.data('bdat_x'), by = node.data('bdat_y');
+        return (bx != null) ? {{x: +bx, y: +by}} : undefined;
+      }},
+      animate: true, animationDuration: 800, padding: 80
+    }};
+  }} else {{
+    opts = {{ name: name, nodeDimensionsIncludeLabels: true,
+             animate: true, animationDuration: 600, padding: 50 }};
+    if (name === 'breadthfirst') opts.directed = true;
+  }}
   cy.layout(opts).run();
 }}
 
