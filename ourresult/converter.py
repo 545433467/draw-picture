@@ -351,7 +351,7 @@ def compute_bdat_positions(elements):
     NODE_W           = 160   # 同层节点水平间距
     SUB_ROW_H        = 140   # 同层内子行垂直间距
     INTER_LAYER_GAP  = 80    # 不同层之间的额外间距
-    MAX_ROW_NODES    = 4     # 同层每行最多节点数（超出则换行）
+    MAX_ROW_NODES    = 10    # 同层每行最多节点数（超出则换行）
     GROUP_PAD        = 110   # 业务组内边距
     GAP_X            = 450   # 业务组之间水平间距（拉大：业务边界更清晰）
     GAP_Y            = 380   # 业务组之间垂直间距
