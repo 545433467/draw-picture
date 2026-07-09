@@ -348,12 +348,14 @@ def compute_bdat_positions(elements):
     - 同层节点水平均匀分布
     返回 {node_id: {'x': float, 'y': float}}
     """
-    NODE_W    = 160   # 同层节点水平间距
-    NODE_H    = 220   # 层间垂直间距（拉大：上下层次感更明显）
-    GROUP_PAD = 110   # 业务组内边距
-    GAP_X     = 450   # 业务组之间水平间距（拉大：业务边界更清晰）
-    GAP_Y     = 380   # 业务组之间垂直间距
-    MAX_COLS  = 2     # 网格最大列数（收窄为 2 列，让每列业务更醒目）
+    NODE_W           = 160   # 同层节点水平间距
+    SUB_ROW_H        = 140   # 同层内子行垂直间距
+    INTER_LAYER_GAP  = 80    # 不同层之间的额外间距
+    MAX_ROW_NODES    = 4     # 同层每行最多节点数（超出则换行）
+    GROUP_PAD        = 110   # 业务组内边距
+    GAP_X            = 450   # 业务组之间水平间距（拉大：业务边界更清晰）
+    GAP_Y            = 380   # 业务组之间垂直间距
+    MAX_COLS         = 2     # 网格最大列数（收窄为 2 列，让每列业务更醒目）
 
     # 收集叶节点和边
     leaf_nodes = {}
@@ -375,8 +377,9 @@ def compute_bdat_positions(elements):
     cols = min(MAX_COLS, n_groups) if n_groups else 1
 
     # 对每个业务组做拓扑层次分配（最长路径 BFS）
-    group_layers  = {}   # biz -> {layer_num: [node_ids]}
-    group_sizes   = {}   # biz -> (width, height)
+    group_layers     = {}   # biz -> {layer_num: [node_ids]}
+    group_sizes      = {}   # biz -> (width, height)
+    group_layer_ymaps = {}  # biz -> {layer_num: y_offset_from_group_top}
 
     for biz in sorted_bizs:
         nodes_in_group = set(biz_groups[biz])
@@ -434,13 +437,27 @@ def compute_bdat_positions(elements):
                     return sum(ps) / len(ps) if ps else float("inf")
                 layers_dict[l].sort(key=lambda n: (bary(n), n))
 
-        max_layer        = max(layers_dict.keys()) if layers_dict else 0
+        # 组宽：每行最多 MAX_ROW_NODES 个节点
         max_per_layer    = max(len(v) for v in layers_dict.values()) if layers_dict else 1
-        group_w          = max_per_layer * NODE_W + 2 * GROUP_PAD
-        group_h          = (max_layer + 1) * NODE_H + 2 * GROUP_PAD
+        row_cap          = min(max_per_layer, MAX_ROW_NODES)
+        group_w          = row_cap * NODE_W + 2 * GROUP_PAD
 
-        group_layers[biz] = layers_dict
-        group_sizes[biz]  = (group_w, group_h)
+        # 组高：按各层实际子行数累加
+        sorted_lnums = sorted(layers_dict.keys())
+        y_acc        = 0
+        layer_y_map  = {}
+        for l in sorted_lnums:
+            layer_y_map[l] = y_acc
+            n_in_l   = len(layers_dict[l])
+            n_subrows = (n_in_l + MAX_ROW_NODES - 1) // MAX_ROW_NODES
+            y_acc    += n_subrows * SUB_ROW_H
+            if l != sorted_lnums[-1]:
+                y_acc += INTER_LAYER_GAP
+        group_h = y_acc + 2 * GROUP_PAD
+
+        group_layers[biz]      = layers_dict
+        group_sizes[biz]       = (group_w, group_h)
+        group_layer_ymaps[biz] = layer_y_map
 
     # 计算网格各列最大宽度、各行最大高度
     col_w = defaultdict(int)
@@ -475,14 +492,20 @@ def compute_bdat_positions(elements):
         base_y     = row_y[r] + GROUP_PAD
         content_w  = group_sizes[biz][0] - 2 * GROUP_PAD
 
+        layer_y_map = group_layer_ymaps[biz]
         for layer_num, layer_nodes in sorted(group_layers[biz].items()):
-            n         = len(layer_nodes)
-            span      = (n - 1) * NODE_W
-            start_x   = base_x + (content_w - span) / 2
-            y_pos     = base_y + layer_num * NODE_H
-            for j, nid in enumerate(layer_nodes):
-                positions[nid] = {"x": round(start_x + j * NODE_W, 1),
-                                  "y": round(y_pos, 1)}
+            n_total      = len(layer_nodes)
+            base_layer_y = base_y + layer_y_map[layer_num]
+            n_subrows    = (n_total + MAX_ROW_NODES - 1) // MAX_ROW_NODES
+            for row_idx in range(n_subrows):
+                row_nodes = layer_nodes[row_idx * MAX_ROW_NODES:(row_idx + 1) * MAX_ROW_NODES]
+                n_row     = len(row_nodes)
+                span      = (n_row - 1) * NODE_W
+                start_x   = base_x + (content_w - span) / 2
+                y_pos     = base_layer_y + row_idx * SUB_ROW_H
+                for j, nid in enumerate(row_nodes):
+                    positions[nid] = {"x": round(start_x + j * NODE_W, 1),
+                                      "y": round(y_pos, 1)}
 
     return positions
 
@@ -526,7 +549,7 @@ def _make_cytoscape_style():
             "selector": "node",
             "style": {
                 "label": "data(name)",
-                "font-size": 11,
+                "font-size": 9,
                 "text-valign": "bottom",
                 "text-halign": "center",
                 "text-margin-y": 4,
