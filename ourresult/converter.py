@@ -68,9 +68,92 @@ SERVICE_STYLE = {
     # 安全
     "iam":          ("#E67E22", "#9A4A00", "pentagon"),
     "kms":          ("#F39C12", "#9A6007", "pentagon"),
+    # 应用服务
+    "nginx":        ("#27AE60", "#1A6B3A", "roundrectangle"),
+    "k8s":          ("#326CE5", "#1A3A8F", "roundrectangle"),
+    "kubernetes":   ("#326CE5", "#1A3A8F", "roundrectangle"),
+    "tomcat":       ("#FF6B35", "#C0441F", "roundrectangle"),
+    "mysql":        ("#3498DB", "#1A5276", "roundrectangle"),
     # 默认
     "default":      ("#AED6F1", "#5D8AA8", "roundrectangle"),
 }
+
+# 服务类型显示名称（用于子容器标签）
+SERVICE_DISPLAY_NAMES = {
+    "nginx": "Nginx", "k8s": "K8s", "kubernetes": "K8s",
+    "tomcat": "Tomcat", "mysql": "MySQL",
+    "ecs": "ECS", "bms": "BMS", "cce": "CCE", "cci": "CCI",
+    "functiongraph": "FunctionGraph",
+    "vpc": "VPC", "eip": "EIP", "elb": "ELB", "slb": "SLB",
+    "nat": "NAT", "vpn": "VPN", "cdn": "CDN", "waf": "WAF",
+    "er": "ER", "dli": "DLI",
+    "oss": "OSS", "obs": "OBS", "sfs": "SFS", "evs": "EVS", "cbr": "CBR",
+    "rds": "RDS", "dcs": "DCS", "redis": "Redis", "dds": "DDS",
+    "mongodb": "MongoDB", "gaussdb": "GaussDB", "dws": "DWS",
+    "css": "CSS", "elasticsearch": "Elasticsearch",
+    "kafka": "Kafka", "mq": "MQ", "dms": "DMS", "smn": "SMN",
+    "apigateway": "API Gateway", "apig": "APIG",
+    "swr": "SWR", "ecr": "ECR",
+    "iam": "IAM", "kms": "KMS",
+    "default": "Other",
+}
+
+# 从节点名称中识别服务类型的关键词（顺序从精确到宽泛）
+NAME_PATTERNS = [
+    ("kubernetes", "k8s"), ("k8s", "k8s"),
+    ("nginx",      "nginx"),
+    ("tomcat",     "tomcat"),
+    ("redis",      "redis"),
+    ("kafka",      "kafka"),
+    ("mysql",      "mysql"),
+    ("mongodb",    "mongodb"),
+    ("elasticsearch", "elasticsearch"),
+    ("gaussdb",    "gaussdb"),
+    ("dws",        "dws"),
+    ("rds",        "rds"),
+    ("dcs",        "dcs"),
+    ("obs",        "obs"),
+    ("oss",        "oss"),
+    ("sfs",        "sfs"),
+    ("evs",        "evs"),
+    ("cbr",        "cbr"),
+    ("elb",        "elb"),
+    ("slb",        "slb"),
+    ("nat",        "nat"),
+    ("waf",        "waf"),
+    ("cdn",        "cdn"),
+    ("vpn",        "vpn"),
+    ("vpc",        "vpc"),
+    ("cce",        "cce"),
+    ("cci",        "cci"),
+    ("bms",        "bms"),
+    ("ecs",        "ecs"),
+    ("dms",        "dms"),
+    ("smn",        "smn"),
+    ("apig",       "apig"),
+    ("apigateway", "apigateway"),
+    ("swr",        "swr"),
+    ("iam",        "iam"),
+    ("kms",        "kms"),
+]
+
+
+def get_service_key(name, type_field):
+    """从 type 字段或节点名称中提取规范化服务类型键。"""
+    if type_field and type_field != "default":
+        # 统一 kubernetes → k8s
+        if type_field == "kubernetes":
+            return "k8s"
+        return type_field
+    name_lower = (name or "").lower()
+    for pattern, key in NAME_PATTERNS:
+        if pattern in name_lower:
+            return key
+    return "default"
+
+
+def get_service_display_name(service_key):
+    return SERVICE_DISPLAY_NAMES.get(service_key, service_key.upper())
 
 # 这些类型作为 compound 容器节点（自动生成，不直接来自行数据）
 _VIRTUAL_CONTAINER_TYPES = {"__region__", "__group__", "__business__"}
@@ -223,10 +306,13 @@ def build_graph(records):
         grp = (r["group"]    or "").strip()
         biz = (r["business"] or "").strip()
 
+        svc_key = get_service_key(r["name"], stype)
+
         d = {
             "id":            nid,
             "name":          r["name"],
             "type":          stype,
+            "service_key":   svc_key,
             "spec":          r["spec"],
             "desc":          r["desc"],
             "resource_id":   r["resource_id"],
@@ -269,6 +355,42 @@ def build_graph(records):
             "shape":        "roundrectangle",
         }})
     nodes = biz_containers + nodes
+
+    # ── 2.6 在业务容器内按服务类型创建子容器 ──────────────────────────────
+    # 统计每个 (biz, service_key) 组合的节点数，≥2 才建子容器
+
+    biz_svc_nodes = defaultdict(lambda: defaultdict(list))   # {biz_id: {svc_key: [node]}}
+    for n in nodes:
+        d = n["data"]
+        if d.get("is_container"):
+            continue
+        biz_pid = d.get("parent", "")
+        svc_key = d.get("service_key", "default")
+        if biz_pid.startswith("biz_"):
+            biz_svc_nodes[biz_pid][svc_key].append(n)
+
+    service_containers = []
+    for biz_id, svc_groups in biz_svc_nodes.items():
+        for svc_key, svc_nodes in svc_groups.items():
+            if len(svc_nodes) < 2:
+                continue
+            sc_id = f"sc_{biz_id}_{safe_id(svc_key)}"
+            display_name = get_service_display_name(svc_key)
+            service_containers.append({"group": "nodes", "data": {
+                "id":           sc_id,
+                "name":         display_name,
+                "type":         "__service__",
+                "is_container": 1,
+                "parent":       biz_id,
+                "bg_color":     "#F2F3F4",
+                "border_color": "#7F8C8D",
+                "shape":        "roundrectangle",
+            }})
+            for n in svc_nodes:
+                n["data"]["parent"]           = sc_id
+                n["data"]["service_container"] = sc_id
+
+    nodes = biz_containers + service_containers + [n for n in nodes if not n["data"].get("type", "").startswith("__business__")]
 
     # 建立 node_id → business 的映射，供跨业务边标记用
     node_biz_map = {n["data"]["id"]: n["data"].get("business", "")
@@ -436,6 +558,20 @@ def compute_bdat_positions(elements):
                     ps = [_upper[p] for p in parents.get(nid, []) if p in _upper]
                     return sum(ps) / len(ps) if ps else float("inf")
                 layers_dict[l].sort(key=lambda n: (bary(n), n))
+
+        # 二次排序：同层内按服务类型聚集，使同类节点相邻（子容器视觉框更紧凑）
+        # 保持服务类型首次出现的相对顺序（稳定分组，不打乱 barycenter 结果）
+        for l in sorted_layer_nums:
+            svc_order = {}
+            orig_idx = {nid: i for i, nid in enumerate(layers_dict[l])}
+            for nid in layers_dict[l]:
+                sk = leaf_nodes[nid].get("service_key", "default")
+                if sk not in svc_order:
+                    svc_order[sk] = len(svc_order)
+            layers_dict[l].sort(key=lambda n: (
+                svc_order.get(leaf_nodes[n].get("service_key", "default"), 999),
+                orig_idx.get(n, 0)   # 同类内保持 barycenter 顺序
+            ))
 
         # 组宽：每行最多 MAX_ROW_NODES 个节点
         max_per_layer    = max(len(v) for v in layers_dict.values()) if layers_dict else 1
@@ -652,6 +788,26 @@ def _make_cytoscape_style():
         {"selector": ".highlighted", "style": {
             "border-color": "#E74C3C", "border-width": 3,
         }},
+        # 服务类型子容器（业务内按服务名分组）
+        {
+            "selector": "node[type = '__service__']",
+            "style": {
+                "border-color": "#95A5A6",
+                "border-width": 1.5,
+                "border-style": "dashed",
+                "background-color": "#F8F9FA",
+                "background-opacity": 0.55,
+                "font-size": 11,
+                "font-weight": "bold",
+                "color": "#2C3E50",
+                "text-valign": "top",
+                "text-background-color": "#fff",
+                "text-background-opacity": 0.9,
+                "text-background-padding": "3px",
+                "padding": "20px",
+                "shape": "roundrectangle",
+            }
+        },
         # 业务容器节点：颜色/文字从 data 属性取，各业务组配色互不相同
         {
             "selector": "node[type = '__business__']",
@@ -735,7 +891,7 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
 
     # 统计数字
     n_nodes = sum(1 for e in elements if e.get("group") == "nodes"
-                  and e["data"].get("type") not in ("__region__", "__group__", "__business__"))
+                  and e["data"].get("type") not in ("__region__", "__group__", "__business__", "__service__"))
     n_edges = sum(1 for e in elements if e.get("group") == "edges")
     n_infer = sum(1 for e in elements if e.get("group") == "edges"
                   and e["data"].get("inferred") == 1)
@@ -884,7 +1040,7 @@ setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
 cy.on('tap', 'node', function(evt) {{
   var d  = evt.target.data();
   var bg = d.bg_color || '#888';
-  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__') {{
+  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__service__') {{
     showContainerDetail(d);
   }} else {{
     showNodeDetail(d, bg);
@@ -976,8 +1132,11 @@ function showNodeDetail(d, bg) {{
 function showContainerDetail(d) {{
   var label = d.type === '__region__' ? '区域'
             : d.type === '__business__' ? '所属业务'
+            : d.type === '__service__' ? '服务类型'
             : '资源分组';
-  var tagColor = d.type === '__business__' ? '#1ABC9C' : '#2E86C1';
+  var tagColor = d.type === '__business__' ? '#1ABC9C'
+               : d.type === '__service__'  ? '#7F8C8D'
+               : '#2E86C1';
   var html = '<div class="d-row"><div class="d-label">'+label+'</div>' +
              '<div class="d-value">'+escHtml(d.name)+'</div></div>';
   var children = cy.getElementById(d.id).descendants().filter(function(n) {{
@@ -1059,20 +1218,31 @@ function toggleBusinessView() {{
   _bizViewOn = !_bizViewOn;
   var btn = document.getElementById('bizToggleBtn');
   if (!_bizViewOn) {{
+    // 先摘除叶节点与服务子容器的父子关系
     cy.nodes().forEach(function(n) {{
       var p = n.data('parent');
-      if (p && p.indexOf('biz_') === 0) {{
+      if (p && (p.indexOf('biz_') === 0 || p.indexOf('sc_') === 0)) {{
         _origParents[n.id()] = p;
         n.move({{ parent: null }});
       }}
     }});
-    cy.nodes('[type = "__business__"]').style('display', 'none');
+    cy.nodes('[type = "__business__"],[type = "__service__"]').style('display', 'none');
     btn.innerHTML = '&#127968; 业务分组:关';
     btn.style.background = 'rgba(255,255,255,.15)';
   }} else {{
-    cy.nodes('[type = "__business__"]').style('display', 'element');
+    cy.nodes('[type = "__business__"],[type = "__service__"]').style('display', 'element');
+    // 先恢复业务容器直属子节点（含服务子容器），再恢复叶节点到服务子容器
+    var bizChildren = {{}}, scChildren = {{}};
     Object.keys(_origParents).forEach(function(nid) {{
-      cy.getElementById(nid).move({{ parent: _origParents[nid] }});
+      var p = _origParents[nid];
+      if (p.indexOf('biz_') === 0) bizChildren[nid] = p;
+      else scChildren[nid] = p;
+    }});
+    Object.keys(bizChildren).forEach(function(nid) {{
+      cy.getElementById(nid).move({{ parent: bizChildren[nid] }});
+    }});
+    Object.keys(scChildren).forEach(function(nid) {{
+      cy.getElementById(nid).move({{ parent: scChildren[nid] }});
     }});
     _origParents = {{}};
     btn.innerHTML = '&#127968; 业务分组:开';
