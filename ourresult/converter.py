@@ -213,6 +213,19 @@ COL_ALIASES = {
 }
 
 
+# 无意义占位节点名称关键词（大小写不敏感，包含即过滤）
+FILTER_KEYWORDS = [
+    "不涉及", "客户未提供", "暂不涉及", "暂无", "无需", "不需要",
+    "n/a", "na", "none", "null", "无", "不适用",
+]
+
+
+def is_filtered_node(name: str) -> bool:
+    """节点名称含无意义占位词时返回 True。"""
+    n = name.strip().lower()
+    return any(kw in n for kw in FILTER_KEYWORDS)
+
+
 def normalize(s):
     return re.sub(r"[\s\(\（\)\）_-]", "", str(s)).lower()
 
@@ -257,7 +270,7 @@ def read_excel(filepath):
             return str(v).strip() if v is not None else default
 
         name = get("服务名称")
-        if not name or name.lower() == "none":
+        if not name or is_filtered_node(name):
             continue
 
         records.append({
@@ -454,7 +467,7 @@ def build_graph(records):
 
         # 确认下游
         if r["targets"]:
-            for t in [x.strip() for x in r["targets"].split(",") if x.strip()]:
+            for t in [x.strip() for x in r["targets"].split(",") if x.strip() and not is_filtered_node(x.strip())]:
                 add_edge(src_id, t, "调用", inferred=False)
 
     return nodes + edges
@@ -473,6 +486,7 @@ def compute_bdat_positions(elements):
     NODE_W           = 160   # 同层节点水平间距
     SUB_ROW_H        = 140   # 同层内子行垂直间距
     INTER_LAYER_GAP  = 80    # 不同层之间的额外间距
+    SVC_GAP          = 70    # 同层内不同服务类型子带之间的垂直间距
     MAX_ROW_NODES    = 10    # 同层每行最多节点数（超出则换行）
     GROUP_PAD        = 110   # 业务组内边距
     GAP_X            = 450   # 业务组之间水平间距（拉大：业务边界更清晰）
@@ -573,20 +587,37 @@ def compute_bdat_positions(elements):
                 orig_idx.get(n, 0)   # 同类内保持 barycenter 顺序
             ))
 
-        # 组宽：每行最多 MAX_ROW_NODES 个节点
-        max_per_layer    = max(len(v) for v in layers_dict.values()) if layers_dict else 1
-        row_cap          = min(max_per_layer, MAX_ROW_NODES)
-        group_w          = row_cap * NODE_W + 2 * GROUP_PAD
+        # 辅助：从已排序的层节点列表中按服务类型分组（保持发现顺序）
+        def layer_svc_groups(nids):
+            order, groups = [], {}
+            for nid in nids:
+                sk = leaf_nodes[nid].get("service_key", "default")
+                if sk not in groups:
+                    groups[sk] = []
+                    order.append(sk)
+                groups[sk].append(nid)
+            return order, groups
 
-        # 组高：按各层实际子行数累加
+        # 组宽：取所有 (层, 服务类型) 组合中最大行节点数
+        max_row_cap = 1
+        for nids in layers_dict.values():
+            _, grps = layer_svc_groups(nids)
+            for cnt in (len(v) for v in grps.values()):
+                max_row_cap = max(max_row_cap, min(cnt, MAX_ROW_NODES))
+        group_w = max_row_cap * NODE_W + 2 * GROUP_PAD
+
+        # 组高：每层内各服务类型子带纵向叠加，子带间加 SVC_GAP
         sorted_lnums = sorted(layers_dict.keys())
         y_acc        = 0
         layer_y_map  = {}
         for l in sorted_lnums:
             layer_y_map[l] = y_acc
-            n_in_l   = len(layers_dict[l])
-            n_subrows = (n_in_l + MAX_ROW_NODES - 1) // MAX_ROW_NODES
-            y_acc    += n_subrows * SUB_ROW_H
+            svc_order, svc_grps = layer_svc_groups(layers_dict[l])
+            for i, sk in enumerate(svc_order):
+                n_subrows = (len(svc_grps[sk]) + MAX_ROW_NODES - 1) // MAX_ROW_NODES
+                y_acc += n_subrows * SUB_ROW_H
+                if i < len(svc_order) - 1:
+                    y_acc += SVC_GAP
             if l != sorted_lnums[-1]:
                 y_acc += INTER_LAYER_GAP
         group_h = y_acc + 2 * GROUP_PAD
@@ -630,18 +661,31 @@ def compute_bdat_positions(elements):
 
         layer_y_map = group_layer_ymaps[biz]
         for layer_num, layer_nodes in sorted(group_layers[biz].items()):
-            n_total      = len(layer_nodes)
             base_layer_y = base_y + layer_y_map[layer_num]
-            n_subrows    = (n_total + MAX_ROW_NODES - 1) // MAX_ROW_NODES
-            for row_idx in range(n_subrows):
-                row_nodes = layer_nodes[row_idx * MAX_ROW_NODES:(row_idx + 1) * MAX_ROW_NODES]
-                n_row     = len(row_nodes)
-                span      = (n_row - 1) * NODE_W
-                start_x   = base_x + (content_w - span) / 2
-                y_pos     = base_layer_y + row_idx * SUB_ROW_H
-                for j, nid in enumerate(row_nodes):
-                    positions[nid] = {"x": round(start_x + j * NODE_W, 1),
-                                      "y": round(y_pos, 1)}
+
+            # 按服务类型子带独立分行，子带间保留 SVC_GAP 垂直间距
+            svc_order, svc_grps = [], {}
+            for nid in layer_nodes:
+                sk = leaf_nodes[nid].get("service_key", "default")
+                if sk not in svc_grps:
+                    svc_grps[sk] = []
+                    svc_order.append(sk)
+                svc_grps[sk].append(nid)
+
+            y_off = 0
+            for sk in svc_order:
+                svc_nids  = svc_grps[sk]
+                n_subrows = (len(svc_nids) + MAX_ROW_NODES - 1) // MAX_ROW_NODES
+                for row_idx in range(n_subrows):
+                    row_nodes = svc_nids[row_idx * MAX_ROW_NODES:(row_idx + 1) * MAX_ROW_NODES]
+                    n_row     = len(row_nodes)
+                    span      = (n_row - 1) * NODE_W
+                    start_x   = base_x + (content_w - span) / 2
+                    y_pos     = base_layer_y + y_off + row_idx * SUB_ROW_H
+                    for j, nid in enumerate(row_nodes):
+                        positions[nid] = {"x": round(start_x + j * NODE_W, 1),
+                                          "y": round(y_pos, 1)}
+                y_off += n_subrows * SUB_ROW_H + SVC_GAP
 
     return positions
 
