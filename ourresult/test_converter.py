@@ -1,6 +1,11 @@
 import unittest
 
-from converter import MAX_VISIBLE_SERVICE_NODES, build_graph, compute_bdat_positions
+from converter import (
+    MAX_VISIBLE_SERVICE_NODES,
+    _make_cytoscape_style,
+    build_graph,
+    compute_bdat_positions,
+)
 
 
 def make_record(name, business="业务A", service_type="cce_deploym", targets="",
@@ -131,6 +136,42 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(summary["name"], "...+3")
         self.assertTrue(all(node.get("parent") == business["id"]
                             for node in resources))
+
+    def test_equivalent_business_names_share_one_container(self):
+        external_name = "gz-hw-lingee-prod-k8s-api"
+        records = [
+            make_record(
+                "ecs-app", business="lingee-prod", service_type="ecs",
+                targets=external_name,
+            ),
+            make_record("rds-app", business="LINGEE_prod", service_type="rds"),
+            make_record("obs-app", business="lingee prod", service_type="obs"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        edges = element_data(elements, "edges")
+        businesses = [node for node in nodes if node.get("type") == "__business__"]
+        service_containers = [
+            node for node in nodes if node.get("type") == "__service__"
+        ]
+
+        self.assertEqual(len(businesses), 1)
+        self.assertEqual(businesses[0]["name"], "lingee-prod")
+        self.assertEqual(businesses[0]["resource_total"], 4)
+        self.assertTrue(all(node["parent"] == businesses[0]["id"]
+                            for node in service_containers))
+        self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
+
+    def test_business_style_wraps_full_name_instead_of_ellipsis(self):
+        business_style = next(
+            item["style"] for item in _make_cytoscape_style()
+            if item["selector"] == "node[type = '__business__']"
+        )
+
+        self.assertEqual(business_style["text-wrap"], "wrap")
+        self.assertEqual(business_style["text-max-width"], "320px")
+        self.assertEqual(business_style["text-overflow-wrap"], "anywhere")
 
     def test_external_k8s_targets_are_aggregated_in_virtual_business(self):
         target_names = [f"checkout-service-{i}" for i in range(1, 9)]

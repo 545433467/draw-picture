@@ -258,6 +258,12 @@ def split_target_names(value):
             if part.strip() and not is_filtered_node(part.strip())]
 
 
+def canonical_business_name(value):
+    """生成业务身份键，合并大小写及常见分隔符差异。"""
+    text = str(value or "").strip()
+    return re.sub(r"[\s_-]+", "-", text).strip("-").casefold()
+
+
 def normalize(s):
     return re.sub(r"[\s\(\（\)\）_-]", "", str(s)).lower()
 
@@ -354,7 +360,11 @@ def build_graph(records):
             svc_key, SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
         )
         is_virtual_business = not bool(source_biz)
-        biz_key = source_biz or f"__service_business__:{svc_key}"
+        if source_biz:
+            normalized_biz = canonical_business_name(source_biz)
+            biz_key = f"__business__:{normalized_biz or source_biz.casefold()}"
+        else:
+            biz_key = f"__service_business__:{svc_key}"
         biz_label = source_biz or get_service_display_name(svc_key)
         group_key = (biz_key, svc_key)
 
@@ -485,7 +495,7 @@ def build_graph(records):
         return {"kind": "resource_name", "target_name": text}
 
     def business_reference_key(value):
-        return re.sub(r"[\s_-]+", "", str(value or "")).casefold()
+        return canonical_business_name(value)
 
     def resolve_inferred_target_entry(source_entry, target_name,
                                       candidate_entries, candidate_name_map):
@@ -1211,6 +1221,9 @@ def _make_cytoscape_style():
                 "text-background-color": "#fff",
                 "text-background-opacity": 0.95,
                 "text-background-padding": "4px",
+                "text-wrap": "wrap",
+                "text-max-width": "320px",
+                "text-overflow-wrap": "anywhere",
                 "text-margin-y": -6,
                 "padding": "50px",
                 "shape": "roundrectangle",
