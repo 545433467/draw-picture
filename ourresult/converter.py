@@ -442,7 +442,7 @@ def build_graph(records):
         return None
 
     def parse_inferred_reference(value):
-        """解析 Service:名称 或 服务类型-业务名 两种推断引用。"""
+        """解析 Service:名称、服务类型-业务名及名称中的服务类型字段。"""
         text = str(value or "").strip()
         service_match = re.match(r"^service\s*[:：]\s*(.+)$", text, re.IGNORECASE)
         if service_match:
@@ -452,13 +452,34 @@ def build_graph(records):
             }
 
         typed_match = re.match(
-            r"^(dcs|rds|dds|redis)[-_](.+)$", text, re.IGNORECASE
+            r"^(dcs|dsc|rds|dds|redis)[-_](.+)$", text, re.IGNORECASE
         )
         if typed_match:
+            service_key = typed_match.group(1).casefold()
             return {
                 "kind": "business_service",
-                "service_key": typed_match.group(1).casefold(),
+                "service_key": "dcs" if service_key == "dsc" else service_key,
                 "business": typed_match.group(2).strip(),
+                "target_name": text,
+            }
+
+        parts = [part for part in re.split(r"[-_.:/\s]+", text) if part]
+        for index, part in enumerate(parts):
+            service_key = part.casefold()
+            if service_key not in {"dcs", "dsc", "rds", "dds", "redis"}:
+                continue
+            normalized_service = "dcs" if service_key == "dsc" else service_key
+            remaining_parts = parts[:index] + parts[index + 1:]
+            hints = []
+            for hint_parts in (
+                    remaining_parts, parts[index + 1:], parts[:index]):
+                hint = "-".join(hint_parts).strip("-")
+                if hint and hint not in hints:
+                    hints.append(hint)
+            return {
+                "kind": "service_marker",
+                "service_key": normalized_service,
+                "business_hints": hints,
                 "target_name": text,
             }
         return {"kind": "resource_name", "target_name": text}
@@ -469,32 +490,40 @@ def build_graph(records):
     def resolve_inferred_target_entry(source_entry, target_name,
                                       candidate_entries, candidate_name_map):
         reference = parse_inferred_reference(target_name)
-        if reference["kind"] == "resource_name":
-            return resolve_target_entry(
-                source_entry, reference["target_name"],
-                candidate_entries, candidate_name_map,
-            )
-
-        # 资源名恰好符合 rds-xxx 等格式时，精确名称优先。
+        # 资源名恰好含 rds/dcs 等字段时，精确名称仍然优先。
         direct_target = resolve_target_entry(
-            source_entry, target_name, candidate_entries, candidate_name_map
+            source_entry, reference["target_name"],
+            candidate_entries, candidate_name_map
         )
         if direct_target:
             return direct_target
+        if reference["kind"] == "resource_name":
+            return None
 
         requested_service = reference["service_key"]
-        service_keys = (["dcs", "redis"] if requested_service in {"dcs", "redis"}
-                        else [requested_service])
-        requested_business = business_reference_key(reference["business"])
-        for service_key in service_keys:
+        if reference["kind"] == "service_marker":
+            source_biz = source_entry["data"]["business_key"]
             for candidate in candidate_entries:
-                candidate_business = candidate["data"].get("business", "")
-                if (service_key_matches(
-                            candidate["data"]["service_key"], service_key
-                        )
-                        and business_reference_key(candidate_business)
-                        == requested_business):
+                if (candidate["data"]["business_key"] == source_biz
+                        and service_key_matches(
+                            candidate["data"]["service_key"], requested_service
+                        )):
                     return candidate
+            business_hints = reference["business_hints"]
+        else:
+            business_hints = [reference["business"]]
+
+        requested_businesses = {
+            business_reference_key(hint) for hint in business_hints if hint
+        }
+        for candidate in candidate_entries:
+            candidate_business = candidate["data"].get("business", "")
+            if (service_key_matches(
+                        candidate["data"]["service_key"], requested_service
+                    )
+                    and business_reference_key(candidate_business)
+                    in requested_businesses):
+                return candidate
         return None
 
     def infer_external_service_key(source_entry, target_name):
@@ -553,7 +582,7 @@ def build_graph(records):
                 continue
             reference = parse_inferred_reference(target_name)
             # 服务类型-业务名是对现有服务组的引用，找不到时不创建伪资源。
-            if reference["kind"] == "business_service":
+            if reference["kind"] in {"business_service", "service_marker"}:
                 continue
             register_external_target(source_entry, reference["target_name"])
 

@@ -279,6 +279,31 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertTrue(external["is_external"])
         self.assertTrue(all(edge["inferred"] == 1 for edge in edges))
 
+    def test_inferred_service_marker_anywhere_uses_source_business(self):
+        records = [
+            make_record(
+                "ecs-ai", business="ai-prod", service_type="ecs",
+                inferred_targets="ai-rds-primary,cache-dsc-main,platform_dds_node",
+            ),
+            make_record("rds-ai", business="ai-prod", service_type="rds"),
+            make_record("dcs-ai", business="ai-prod", service_type="dcs"),
+            make_record("dds-ai", business="ai-prod", service_type="dds"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        edges = element_data(elements, "edges")
+        node_ids = {node["name"]: node["id"] for node in nodes
+                    if not node.get("is_container")}
+
+        self.assertEqual(len(edges), 3)
+        self.assertEqual(
+            {edge["target"] for edge in edges},
+            {node_ids["rds-ai"], node_ids["dcs-ai"], node_ids["dds-ai"]},
+        )
+        self.assertTrue(all(edge["inferred"] == 1 for edge in edges))
+        self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
+
     def test_placeholder_filter_does_not_remove_real_names_containing_na(self):
         records = [
             make_record("ecs-prod", service_type="ecs", targets="finance-rds"),
