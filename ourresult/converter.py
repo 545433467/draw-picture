@@ -72,6 +72,7 @@ SERVICE_STYLE = {
     "nginx":        ("#27AE60", "#1A6B3A", "roundrectangle"),
     "k8s":          ("#326CE5", "#1A3A8F", "roundrectangle"),
     "kubernetes":   ("#326CE5", "#1A3A8F", "roundrectangle"),
+    "maas":         ("#00897B", "#005B4F", "roundrectangle"),
     "tomcat":       ("#FF6B35", "#C0441F", "roundrectangle"),
     "mysql":        ("#3498DB", "#1A5276", "roundrectangle"),
     # 默认
@@ -80,7 +81,7 @@ SERVICE_STYLE = {
 
 # 服务类型显示名称（用于子容器标签）
 SERVICE_DISPLAY_NAMES = {
-    "nginx": "Nginx", "k8s": "K8s", "kubernetes": "K8s",
+    "nginx": "Nginx", "k8s": "K8s", "kubernetes": "K8s", "maas": "MaaS",
     "tomcat": "Tomcat", "mysql": "MySQL",
     "ecs": "ECS", "bms": "BMS", "cce": "CCE", "cci": "CCI",
     "functiongraph": "FunctionGraph",
@@ -101,6 +102,7 @@ SERVICE_DISPLAY_NAMES = {
 # 从节点名称中识别服务类型的关键词（顺序从精确到宽泛）
 NAME_PATTERNS = [
     ("kubernetes", "k8s"), ("k8s", "k8s"),
+    ("maas",       "maas"),
     ("nginx",      "nginx"),
     ("tomcat",     "tomcat"),
     ("redis",      "redis"),
@@ -237,17 +239,23 @@ COL_ALIASES = {
 }
 
 
-# 无意义占位节点名称关键词（大小写不敏感，包含即过滤）
-FILTER_KEYWORDS = [
-    "不涉及", "客户未提供", "暂不涉及", "暂无", "无需", "不需要",
-    "n/a", "na", "none", "null", "无", "不适用",
+# 无意义占位节点名称：中文短语按包含匹配，短英文值仅做整值匹配。
+FILTER_PHRASES = [
+    "不涉及", "客户未提供", "暂不涉及", "暂无", "无需", "不需要", "不适用",
 ]
+FILTER_EXACT_VALUES = {"n/a", "na", "none", "null", "无"}
 
 
 def is_filtered_node(name: str) -> bool:
-    """节点名称含无意义占位词时返回 True。"""
+    """节点名称是无意义占位值时返回 True。"""
     n = name.strip().lower()
-    return any(kw in n for kw in FILTER_KEYWORDS)
+    return n in FILTER_EXACT_VALUES or any(phrase in n for phrase in FILTER_PHRASES)
+
+
+def split_target_names(value):
+    """兼容中英文逗号、分号和换行分隔的下游资源引用。"""
+    return [part.strip() for part in re.split(r"[,，;；\r\n]+", str(value or ""))
+            if part.strip() and not is_filtered_node(part.strip())]
 
 
 def normalize(s):
@@ -323,6 +331,7 @@ def build_graph(records):
     def safe_id(s):
         return re.sub(r"[^a-zA-Z0-9_\-]", "_", str(s))
 
+    records = list(records)
     nodes = []
     edges = []
     edge_lookup = {}
@@ -333,17 +342,17 @@ def build_graph(records):
     # 与普通业务执行相同的 5 节点聚合规则。
 
     entries = []
-    service_groups = defaultdict(list)
-    name_entry_map = {}
 
-    for i, r in enumerate(records):
-        nid = f"n_{safe_id(r['name'])}_{i}"
+    def make_entry(r, index, is_external=False, forced_service_key=None):
+        nid = f"n_{safe_id(r['name'])}_{index}"
         stype = r["type"] or "default"
-        bg, border, shape = SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
         reg = (r["region"]   or "").strip()
         grp = (r["group"]    or "").strip()
         source_biz = (r["business"] or "").strip()
-        svc_key = get_service_key(r["name"], stype)
+        svc_key = forced_service_key or get_service_key(r["name"], stype)
+        bg, border, shape = SERVICE_STYLE.get(
+            svc_key, SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
+        )
         is_virtual_business = not bool(source_biz)
         biz_key = source_biz or f"__service_business__:{svc_key}"
         biz_label = source_biz or get_service_display_name(svc_key)
@@ -370,16 +379,124 @@ def build_graph(records):
             "shape":         shape,
             "is_container":  0,
             "is_summary":    0,
+            "is_external":   1 if is_external else 0,
         }
-        entry = {
-            "index": i,
+        return {
+            "index": index,
             "record": r,
             "data": data,
             "group_key": group_key,
         }
+
+    for i, r in enumerate(records):
+        entry = make_entry(r, i)
         entries.append(entry)
-        name_entry_map.setdefault(r["name"], entry)
-        service_groups[group_key].append(entry)
+
+    def name_key(name):
+        return str(name or "").strip().casefold()
+
+    def build_name_map(candidate_entries):
+        result = defaultdict(list)
+        for candidate in candidate_entries:
+            result[name_key(candidate["data"]["name"])].append(candidate)
+        return result
+
+    service_aliases = {}
+    for key, display_name in SERVICE_DISPLAY_NAMES.items():
+        service_aliases[name_key(key)] = key
+        service_aliases[name_key(display_name)] = key
+
+    def resolve_target_entry(source_entry, target_name, candidate_entries,
+                             candidate_name_map):
+        """优先解析同业务同名资源，也支持 RDS/DCS 等服务统称引用。"""
+        candidates = candidate_name_map.get(name_key(target_name), [])
+        source_biz = source_entry["data"]["business_key"]
+        for candidate in candidates:
+            if candidate["data"]["business_key"] == source_biz:
+                return candidate
+        if candidates:
+            return candidates[0]
+
+        service_key = service_aliases.get(name_key(target_name))
+        if service_key:
+            for candidate in candidate_entries:
+                if (candidate["data"]["business_key"] == source_biz
+                        and candidate["data"]["service_key"] == service_key):
+                    return candidate
+        return None
+
+    def infer_external_service_key(source_entry, target_name):
+        service_key = get_service_key(target_name, "default")
+        if service_key != "default":
+            return service_key
+        source_service = source_entry["data"]["service_key"]
+        if source_service == "k8s" or source_service.startswith("cce"):
+            return "k8s"
+        if re.search(
+                r"(^|[/_.:\-])(pod|deployment|deploy|statefulset|daemonset|namespace)"
+                r"($|[/_.:\-])", target_name, re.IGNORECASE):
+            return "k8s"
+        return "default"
+
+    def infer_external_business(target_name, service_key):
+        """从标准外部节点名的第 3、4 段提取业务名。"""
+        if service_key not in {"k8s", "maas"}:
+            return ""
+        parts = [part.strip() for part in str(target_name).split("-") if part.strip()]
+        service_tokens = {"k8s", "kubernetes", "maas"}
+        if len(parts) < 5 or not any(
+                part.casefold() in service_tokens for part in parts[4:]):
+            return ""
+        business_parts = parts[2:4]
+        if any(part.casefold() in service_tokens for part in business_parts):
+            return ""
+        return "-".join(business_parts)
+
+    # 外部目标也必须先进入分组规划，否则它们会绕过“前 5 个 + 摘要”规则。
+    real_entries = list(entries)
+    real_name_map = build_name_map(real_entries)
+    external_specs = {}
+    for source_entry in real_entries:
+        for target_name in split_target_names(source_entry["record"]["targets"]):
+            if resolve_target_entry(source_entry, target_name,
+                                    real_entries, real_name_map):
+                continue
+            key = name_key(target_name)
+            spec = external_specs.setdefault(key, {
+                "name": target_name,
+                "service_key": "default",
+            })
+            inferred_key = infer_external_service_key(source_entry, target_name)
+            if inferred_key != "default":
+                spec["service_key"] = inferred_key
+
+    for spec in external_specs.values():
+        inferred_business = infer_external_business(
+            spec["name"], spec["service_key"]
+        )
+        external_record = {
+            "name": spec["name"],
+            "type": spec["service_key"],
+            "resource_id": "",
+            "enterprise_id": "",
+            "region": "",
+            "group": "",
+            "business": inferred_business,
+            "desc": "（外部/未列出服务）",
+            "spec": "",
+            "targets": "",
+            "inferred_targets": "",
+            "reason": "",
+        }
+        entries.append(make_entry(
+            external_record, len(entries), is_external=True,
+            forced_service_key=spec["service_key"],
+        ))
+
+    name_entry_map = build_name_map(entries)
+    service_groups = defaultdict(list)
+    for entry in entries:
+        service_groups[entry["group_key"]].append(entry)
 
     visible_indexes = set()
     group_info = {}
@@ -512,31 +629,7 @@ def build_graph(records):
 
     nodes = biz_containers + service_containers + nodes
 
-    # ── 3. 解析外部节点（targets 中不存在的名称）─────────────────────────
-
-    all_node_ids = {n["data"]["id"] for n in nodes}
-
-    def ensure_ext_node(name):
-        """目标名不在记录中时，创建外部虚拟节点"""
-        ext_id = f"n_ext_{safe_id(name)}"
-        if ext_id not in all_node_ids:
-            bg, border, shape = SERVICE_STYLE["default"]
-            nodes.append({"group": "nodes", "data": {
-                "id": ext_id, "name": name,
-                "display_label": make_node_display_label(name, "default"),
-                "type": "default", "service_key": "default",
-                "business": "", "business_key": "",
-                "is_virtual_business": 0, "is_grouped_resource": 0,
-                "is_container": 0, "is_summary": 0,
-                "bg_color": bg, "border_color": border, "shape": shape,
-                "spec": "", "desc": "（外部/未列出服务）",
-                "resource_id": "", "enterprise_id": "",
-                "region": "", "group_label": "", "reason": "",
-            }})
-            all_node_ids.add(ext_id)
-        return ext_id
-
-    # ── 4. 创建边 ─────────────────────────────────────────────────────────
+    # ── 3. 创建边 ─────────────────────────────────────────────────────────
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
@@ -580,26 +673,25 @@ def build_graph(records):
         edge_lookup[key] = edge_data
         edges.append({"group": "edges", "data": edge_data})
 
-    for source_entry in entries:
+    for source_entry in real_entries:
         r = source_entry["record"]
         # 确认下游
         if r["targets"]:
-            for t in [x.strip() for x in r["targets"].split(",") if x.strip() and not is_filtered_node(x.strip())]:
-                target_entry = name_entry_map.get(t)
-                if target_entry:
-                    source_biz = source_entry["data"]["business_key"]
-                    target_biz = target_entry["data"]["business_key"]
-                    cross_biz = bool(source_biz and target_biz and source_biz != target_biz)
-                    if cross_biz:
-                        src_id = representative_endpoint(source_entry)
-                        tgt_id = representative_endpoint(target_entry)
-                    else:
-                        src_id = internal_endpoint(source_entry)
-                        tgt_id = internal_endpoint(target_entry)
+            for t in split_target_names(r["targets"]):
+                target_entry = resolve_target_entry(
+                    source_entry, t, entries, name_entry_map
+                )
+                if not target_entry:
+                    continue
+                source_biz = source_entry["data"]["business_key"]
+                target_biz = target_entry["data"]["business_key"]
+                cross_biz = bool(source_biz and target_biz and source_biz != target_biz)
+                if cross_biz:
+                    src_id = representative_endpoint(source_entry)
+                    tgt_id = representative_endpoint(target_entry)
                 else:
-                    cross_biz = False
                     src_id = internal_endpoint(source_entry)
-                    tgt_id = ensure_ext_node(t)
+                    tgt_id = internal_endpoint(target_entry)
                 add_edge(src_id, tgt_id, r["name"], t, cross_biz)
 
     return nodes + edges
