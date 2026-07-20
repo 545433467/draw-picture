@@ -11,7 +11,7 @@ import sys
 import os
 import re
 import argparse
-from collections import defaultdict, deque
+from collections import defaultdict
 
 try:
     import openpyxl
@@ -154,6 +154,27 @@ def get_service_key(name, type_field):
 
 def get_service_display_name(service_key):
     return SERVICE_DISPLAY_NAMES.get(service_key, service_key.upper())
+
+
+def compact_resource_name(name, max_units=26):
+    """按近似显示宽度截短资源名，完整名称仍保留在节点详情中。"""
+    text = str(name or "")
+    units = 0
+    result = []
+    for char in text:
+        char_units = 1 if ord(char) < 128 else 2
+        if units + char_units > max_units - 3:
+            return "".join(result) + "..."
+        result.append(char)
+        units += char_units
+    return text
+
+
+def make_node_display_label(name, service_key):
+    """节点框固定显示两行：服务统称 + resource_name。"""
+    service_name = compact_resource_name(get_service_display_name(service_key))
+    return f"{service_name}\n{compact_resource_name(name)}"
+
 
 # 这些类型作为 compound 容器节点（自动生成，不直接来自行数据）
 _VIRTUAL_CONTAINER_TYPES = {"__region__", "__group__", "__business__"}
@@ -308,8 +329,8 @@ def build_graph(records):
     edge_count = [0]
 
     # ── 1. 规划资源可见性 ──────────────────────────────────────────────────
-    # 聚合键是 (所属业务, 服务类型)。未填写业务的资源保持原样，避免把无归属资源
-    # 意外合并。记录条目仍保留在内存中供连线解析，但只有前 5 个会写入 HTML。
+    # 聚合键是 (业务键, 服务类型)。未填写业务的资源按服务类型生成虚拟业务，
+    # 与普通业务执行相同的 5 节点聚合规则。
 
     entries = []
     service_groups = defaultdict(list)
@@ -321,13 +342,17 @@ def build_graph(records):
         bg, border, shape = SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
         reg = (r["region"]   or "").strip()
         grp = (r["group"]    or "").strip()
-        biz = (r["business"] or "").strip()
+        source_biz = (r["business"] or "").strip()
         svc_key = get_service_key(r["name"], stype)
-        group_key = (biz, svc_key) if biz else None
+        is_virtual_business = not bool(source_biz)
+        biz_key = source_biz or f"__service_business__:{svc_key}"
+        biz_label = source_biz or get_service_display_name(svc_key)
+        group_key = (biz_key, svc_key)
 
         data = {
             "id":            nid,
             "name":          r["name"],
+            "display_label": make_node_display_label(r["name"], svc_key),
             "type":          stype,
             "service_key":   svc_key,
             "spec":          r["spec"],
@@ -336,7 +361,9 @@ def build_graph(records):
             "enterprise_id": r["enterprise_id"],
             "region":        reg,
             "group_label":   grp,
-            "business":      biz,
+            "business":      biz_label,
+            "business_key":  biz_key,
+            "is_virtual_business": 1 if is_virtual_business else 0,
             "reason":        r["reason"],
             "bg_color":      bg,
             "border_color":  border,
@@ -352,10 +379,9 @@ def build_graph(records):
         }
         entries.append(entry)
         name_entry_map.setdefault(r["name"], entry)
-        if group_key:
-            service_groups[group_key].append(entry)
+        service_groups[group_key].append(entry)
 
-    visible_indexes = {entry["index"] for entry in entries if not entry["group_key"]}
+    visible_indexes = set()
     group_info = {}
     for group_index, (group_key, group_entries) in enumerate(service_groups.items()):
         visible_entries = group_entries[:MAX_VISIBLE_SERVICE_NODES]
@@ -379,7 +405,8 @@ def build_graph(records):
         hidden_count = len(info["hidden"])
         if not hidden_count:
             continue
-        biz, svc_key = group_key
+        biz_key, svc_key = group_key
+        sample_data = info["entries"][0]["data"]
         summary_id = f"summary_{info['group_index']}"
         info["summary_id"] = summary_id
         bg, border, _ = SERVICE_STYLE.get(svc_key, SERVICE_STYLE["default"])
@@ -389,7 +416,10 @@ def build_graph(records):
             "type":            "__summary__",
             "service_key":     svc_key,
             "service_name":    get_service_display_name(svc_key),
-            "business":        biz,
+            "business":        sample_data["business"],
+            "business_key":    biz_key,
+            "is_virtual_business": sample_data["is_virtual_business"],
+            "is_grouped_resource": 1,
             "collapsed_count": hidden_count,
             "resource_total":  len(info["entries"]),
             "spec":            "",
@@ -408,23 +438,36 @@ def build_graph(records):
 
     # ── 2. 创建业务容器节点，为叶节点设置 parent ─────────────────────────
 
-    business_map = {}   # biz_name → biz_id（用计数器生成唯一ID，避免中文被safe_id转成相同下划线）
+    business_map = {}   # business_key → biz_id
+    business_meta = {}
+    business_totals = defaultdict(int)
+    for entry in entries:
+        business_totals[entry["data"]["business_key"]] += 1
     _biz_counter = 0
     for n in nodes:
-        biz = n["data"].get("business", "").strip()
-        if not biz:
+        biz_key = n["data"].get("business_key", "").strip()
+        if not biz_key:
             continue
-        if biz not in business_map:
-            business_map[biz] = f"biz_{_biz_counter}"
+        if biz_key not in business_map:
+            business_map[biz_key] = f"biz_{_biz_counter}"
+            business_meta[biz_key] = {
+                "name": n["data"].get("business", ""),
+                "is_virtual": n["data"].get("is_virtual_business", 0),
+            }
             _biz_counter += 1
-        n["data"]["parent"] = business_map[biz]
+        n["data"]["parent"] = business_map[biz_key]
+        n["data"]["is_grouped_resource"] = 1
 
     biz_containers = []
-    for i, (biz_name, biz_id) in enumerate(business_map.items()):
+    for i, (biz_key, biz_id) in enumerate(business_map.items()):
+        meta = business_meta[biz_key]
         bg, border, text = BUSINESS_PALETTE[i % len(BUSINESS_PALETTE)]
         biz_containers.append({"group": "nodes", "data": {
             "id":           biz_id,
-            "name":         biz_name,
+            "name":         meta["name"],
+            "business_key": biz_key,
+            "resource_total": business_totals[biz_key],
+            "is_virtual_business": meta["is_virtual"],
             "type":         "__business__",
             "is_container": 1,
             "bg_color":     bg,
@@ -435,12 +478,18 @@ def build_graph(records):
     # ── 2.6 在业务容器内按服务类型创建子容器 ──────────────────────────────
     service_containers = []
     node_by_id = {node["data"]["id"]: node for node in nodes}
-    for (biz, svc_key), info in service_groups.items():
-        if len(info) < 2:
+    for (biz_key, svc_key), info in service_groups.items():
+        biz_id = business_map[biz_key]
+        group_meta = group_info[(biz_key, svc_key)]
+        rendered_ids = {entry["data"]["id"] for entry in group_meta["visible"]}
+        if group_meta["summary_id"]:
+            rendered_ids.add(group_meta["summary_id"])
+
+        # 虚拟业务框本身已经代表服务类型，不再重复嵌套同名服务框。
+        if business_meta[biz_key]["is_virtual"]:
             continue
-        biz_id = business_map[biz]
+
         sc_id = f"sc_{biz_id}_{safe_id(svc_key)}"
-        group_meta = group_info[(biz, svc_key)]
         service_containers.append({"group": "nodes", "data": {
             "id":              sc_id,
             "name":            get_service_display_name(svc_key),
@@ -455,9 +504,6 @@ def build_graph(records):
             "border_color":    "#7F8C8D",
             "shape":           "roundrectangle",
         }})
-        rendered_ids = {entry["data"]["id"] for entry in group_meta["visible"]}
-        if group_meta["summary_id"]:
-            rendered_ids.add(group_meta["summary_id"])
         for node_id in rendered_ids:
             node = node_by_id.get(node_id)
             if node:
@@ -477,8 +523,11 @@ def build_graph(records):
             bg, border, shape = SERVICE_STYLE["default"]
             nodes.append({"group": "nodes", "data": {
                 "id": ext_id, "name": name,
+                "display_label": make_node_display_label(name, "default"),
                 "type": "default", "service_key": "default",
-                "business": "", "is_container": 0, "is_summary": 0,
+                "business": "", "business_key": "",
+                "is_virtual_business": 0, "is_grouped_resource": 0,
+                "is_container": 0, "is_summary": 0,
                 "bg_color": bg, "border_color": border, "shape": shape,
                 "spec": "", "desc": "（外部/未列出服务）",
                 "resource_id": "", "enterprise_id": "",
@@ -538,8 +587,8 @@ def build_graph(records):
             for t in [x.strip() for x in r["targets"].split(",") if x.strip() and not is_filtered_node(x.strip())]:
                 target_entry = name_entry_map.get(t)
                 if target_entry:
-                    source_biz = source_entry["data"]["business"]
-                    target_biz = target_entry["data"]["business"]
+                    source_biz = source_entry["data"]["business_key"]
+                    target_biz = target_entry["data"]["business_key"]
                     cross_biz = bool(source_biz and target_biz and source_biz != target_biz)
                     if cross_biz:
                         src_id = representative_endpoint(source_entry)
@@ -562,21 +611,19 @@ def compute_bdat_positions(elements):
     """
     按业务分组（BDAT）计算节点的预设坐标：
     - 各业务组横向排列成网格
-    - 组内按依赖关系纵向分层（上游在上，下游在下）
-    - 同层节点水平均匀分布
+    - 组内以服务类型为不可拆分的连续矩形块
+    - 服务块按依赖关系纵向排序，块内每行最多 5 个节点
     返回 {node_id: {'x': float, 'y': float}}
     """
-    NODE_W           = 160   # 同层节点水平间距
-    SUB_ROW_H        = 140   # 同层内子行垂直间距
-    INTER_LAYER_GAP  = 80    # 不同层之间的额外间距
-    SVC_GAP          = 70    # 同层内不同服务类型子带之间的垂直间距
-    MAX_ROW_NODES    = MAX_VISIBLE_SERVICE_NODES  # 每行最多 5 个节点
-    GROUP_PAD        = 110   # 业务组内边距
-    GAP_X            = 450   # 业务组之间水平间距（拉大：业务边界更清晰）
-    GAP_Y            = 380   # 业务组之间垂直间距
-    MAX_COLS         = 2     # 网格最大列数（收窄为 2 列，让每列业务更醒目）
+    NODE_W        = 195
+    ROW_H         = 105
+    SERVICE_GAP   = 90
+    MAX_ROW_NODES = MAX_VISIBLE_SERVICE_NODES
+    GROUP_PAD     = 110
+    GAP_X         = 450
+    GAP_Y         = 380
+    MAX_COLS      = 2
 
-    # 收集叶节点和边
     leaf_nodes = {}
     edges_list = []
     for e in elements:
@@ -585,138 +632,91 @@ def compute_bdat_positions(elements):
         elif e["group"] == "edges":
             edges_list.append((e["data"]["source"], e["data"]["target"]))
 
-    # 按业务分组
     biz_groups = defaultdict(list)
     for nid, data in leaf_nodes.items():
-        biz = (data.get("business") or "").strip() or "__ungrouped__"
-        biz_groups[biz].append(nid)
+        biz_key = (data.get("business_key") or "").strip() or "__external__"
+        biz_groups[biz_key].append(nid)
 
-    sorted_bizs = sorted(biz_groups.keys())
+    sorted_bizs = list(biz_groups.keys())
     n_groups = len(sorted_bizs)
     cols = min(MAX_COLS, n_groups) if n_groups else 1
 
-    # 对每个业务组做拓扑层次分配（最长路径 BFS）
-    group_layers     = {}   # biz -> {layer_num: [node_ids]}
-    group_sizes      = {}   # biz -> (width, height)
-    group_layer_ymaps = {}  # biz -> {layer_num: y_offset_from_group_top}
+    group_services = {}
+    service_orders = {}
+    service_offsets = {}
+    group_sizes = {}
 
-    for biz in sorted_bizs:
-        nodes_in_group = set(biz_groups[biz])
-        in_deg  = defaultdict(int)
-        adj     = defaultdict(list)
+    for biz_key in sorted_bizs:
+        nodes_in_group = set(biz_groups[biz_key])
+        services = defaultdict(list)
+        service_first_index = {}
+        for index, nid in enumerate(biz_groups[biz_key]):
+            service_key = leaf_nodes[nid].get("service_key", "default")
+            services[service_key].append(nid)
+            service_first_index.setdefault(service_key, index)
+
+        # 将节点级依赖提升为服务级依赖，用于排列完整服务块。
+        in_deg = {service_key: 0 for service_key in services}
+        adjacency = defaultdict(set)
         for src, tgt in edges_list:
-            if src in nodes_in_group and tgt in nodes_in_group:
-                adj[src].append(tgt)
-                in_deg[tgt] += 1
+            if src not in nodes_in_group or tgt not in nodes_in_group:
+                continue
+            src_service = leaf_nodes[src].get("service_key", "default")
+            tgt_service = leaf_nodes[tgt].get("service_key", "default")
+            if src_service == tgt_service or tgt_service in adjacency[src_service]:
+                continue
+            adjacency[src_service].add(tgt_service)
+            in_deg[tgt_service] += 1
 
-        # 层号 = 从任意根节点到达该节点的最长路径长度
-        layer    = {}
-        rem_deg  = {n: in_deg[n] for n in nodes_in_group}
-        queue    = deque()
-        for n in nodes_in_group:
-            if rem_deg[n] == 0:
-                layer[n] = 0
-                queue.append(n)
+        ready = sorted(
+            (key for key, degree in in_deg.items() if degree == 0),
+            key=lambda key: service_first_index[key],
+        )
+        service_order = []
+        while ready:
+            service_key = ready.pop(0)
+            service_order.append(service_key)
+            for target_key in sorted(adjacency[service_key],
+                                     key=lambda key: service_first_index[key]):
+                in_deg[target_key] -= 1
+                if in_deg[target_key] == 0:
+                    ready.append(target_key)
+                    ready.sort(key=lambda key: service_first_index[key])
 
-        while queue:
-            n = queue.popleft()
-            for nb in adj[n]:
-                new_l = layer[n] + 1
-                if nb not in layer or layer[nb] < new_l:
-                    layer[nb] = new_l
-                rem_deg[nb] -= 1
-                if rem_deg[nb] == 0:
-                    queue.append(nb)
+        # 服务间存在环路时，剩余服务按首次出现顺序连续排在末尾。
+        service_order.extend(sorted(
+            (key for key in services if key not in service_order),
+            key=lambda key: service_first_index[key],
+        ))
 
-        # 剩余未访问节点（存在环路）回退到第0层
-        for n in nodes_in_group:
-            if n not in layer:
-                layer[n] = 0
-
-        # 整理成 {层号: [节点列表]}，先按名称排序保证初始确定性
-        layers_dict = defaultdict(list)
-        for n, l in layer.items():
-            layers_dict[l].append(n)
-        for l in layers_dict:
-            layers_dict[l].sort()
-
-        # 重心法（barycenter）：让下层节点按上游位置排序，
-        # 使 ECS→ELB 这种链路上，ELB 尽量出现在 ECS 正下方
-        parents = defaultdict(list)
-        for src, tgt in edges_list:
-            if src in nodes_in_group and tgt in nodes_in_group:
-                parents[tgt].append(src)
-
-        sorted_layer_nums = sorted(layers_dict.keys())
-        for _ in range(4):   # 4 轮通常足够收敛
-            for l in sorted_layer_nums[1:]:
-                upper = {nid: i for i, nid in enumerate(layers_dict[l - 1])}
-                def bary(nid, _upper=upper):
-                    ps = [_upper[p] for p in parents.get(nid, []) if p in _upper]
-                    return sum(ps) / len(ps) if ps else float("inf")
-                layers_dict[l].sort(key=lambda n: (bary(n), n))
-
-        # 二次排序：同层内按服务类型聚集，使同类节点相邻（子容器视觉框更紧凑）
-        # 保持服务类型首次出现的相对顺序（稳定分组，不打乱 barycenter 结果）
-        for l in sorted_layer_nums:
-            svc_order = {}
-            orig_idx = {nid: i for i, nid in enumerate(layers_dict[l])}
-            for nid in layers_dict[l]:
-                sk = leaf_nodes[nid].get("service_key", "default")
-                if sk not in svc_order:
-                    svc_order[sk] = len(svc_order)
-            layers_dict[l].sort(key=lambda n: (
-                svc_order.get(leaf_nodes[n].get("service_key", "default"), 999),
-                orig_idx.get(n, 0)   # 同类内保持 barycenter 顺序
-            ))
-
-        # 辅助：从已排序的层节点列表中按服务类型分组（保持发现顺序）
-        def layer_svc_groups(nids):
-            order, groups = [], {}
-            for nid in nids:
-                sk = leaf_nodes[nid].get("service_key", "default")
-                if sk not in groups:
-                    groups[sk] = []
-                    order.append(sk)
-                groups[sk].append(nid)
-            return order, groups
-
-        # 组宽：取所有 (层, 服务类型) 组合中最大行节点数
-        max_row_cap = 1
-        for nids in layers_dict.values():
-            _, grps = layer_svc_groups(nids)
-            for cnt in (len(v) for v in grps.values()):
-                max_row_cap = max(max_row_cap, min(cnt, MAX_ROW_NODES))
+        max_row_cap = max(min(len(node_ids), MAX_ROW_NODES)
+                          for node_ids in services.values())
         group_w = max_row_cap * NODE_W + 2 * GROUP_PAD
 
-        # 组高：每层内各服务类型子带纵向叠加，子带间加 SVC_GAP
-        sorted_lnums = sorted(layers_dict.keys())
-        y_acc        = 0
-        layer_y_map  = {}
-        for l in sorted_lnums:
-            layer_y_map[l] = y_acc
-            svc_order, svc_grps = layer_svc_groups(layers_dict[l])
-            for i, sk in enumerate(svc_order):
-                n_subrows = (len(svc_grps[sk]) + MAX_ROW_NODES - 1) // MAX_ROW_NODES
-                y_acc += n_subrows * SUB_ROW_H
-                if i < len(svc_order) - 1:
-                    y_acc += SVC_GAP
-            if l != sorted_lnums[-1]:
-                y_acc += INTER_LAYER_GAP
+        y_acc = 0
+        offsets = {}
+        for index, service_key in enumerate(service_order):
+            offsets[service_key] = y_acc
+            row_count = ((len(services[service_key]) + MAX_ROW_NODES - 1)
+                         // MAX_ROW_NODES)
+            y_acc += row_count * ROW_H
+            if index < len(service_order) - 1:
+                y_acc += SERVICE_GAP
         group_h = y_acc + 2 * GROUP_PAD
 
-        group_layers[biz]      = layers_dict
-        group_sizes[biz]       = (group_w, group_h)
-        group_layer_ymaps[biz] = layer_y_map
+        group_services[biz_key] = services
+        service_orders[biz_key] = service_order
+        service_offsets[biz_key] = offsets
+        group_sizes[biz_key] = (group_w, group_h)
 
     # 计算网格各列最大宽度、各行最大高度
     col_w = defaultdict(int)
     row_h = defaultdict(int)
     grid_pos = {}
-    for i, biz in enumerate(sorted_bizs):
+    for i, biz_key in enumerate(sorted_bizs):
         c, r = i % cols, i // cols
-        grid_pos[biz] = (c, r)
-        w, h = group_sizes[biz]
+        grid_pos[biz_key] = (c, r)
+        w, h = group_sizes[biz_key]
         col_w[c] = max(col_w[c], w)
         row_h[r] = max(row_h[r], h)
 
@@ -736,39 +736,29 @@ def compute_bdat_positions(elements):
 
     # 逐节点赋坐标
     positions = {}
-    for biz in sorted_bizs:
-        c, r       = grid_pos[biz]
+    for biz_key in sorted_bizs:
+        c, r       = grid_pos[biz_key]
         base_x     = col_x[c] + GROUP_PAD
         base_y     = row_y[r] + GROUP_PAD
-        content_w  = group_sizes[biz][0] - 2 * GROUP_PAD
+        content_w  = group_sizes[biz_key][0] - 2 * GROUP_PAD
 
-        layer_y_map = group_layer_ymaps[biz]
-        for layer_num, layer_nodes in sorted(group_layers[biz].items()):
-            base_layer_y = base_y + layer_y_map[layer_num]
-
-            # 按服务类型子带独立分行，子带间保留 SVC_GAP 垂直间距
-            svc_order, svc_grps = [], {}
-            for nid in layer_nodes:
-                sk = leaf_nodes[nid].get("service_key", "default")
-                if sk not in svc_grps:
-                    svc_grps[sk] = []
-                    svc_order.append(sk)
-                svc_grps[sk].append(nid)
-
-            y_off = 0
-            for sk in svc_order:
-                svc_nids  = svc_grps[sk]
-                n_subrows = (len(svc_nids) + MAX_ROW_NODES - 1) // MAX_ROW_NODES
-                for row_idx in range(n_subrows):
-                    row_nodes = svc_nids[row_idx * MAX_ROW_NODES:(row_idx + 1) * MAX_ROW_NODES]
-                    n_row     = len(row_nodes)
-                    span      = (n_row - 1) * NODE_W
-                    start_x   = base_x + (content_w - span) / 2
-                    y_pos     = base_layer_y + y_off + row_idx * SUB_ROW_H
-                    for j, nid in enumerate(row_nodes):
-                        positions[nid] = {"x": round(start_x + j * NODE_W, 1),
-                                          "y": round(y_pos, 1)}
-                y_off += n_subrows * SUB_ROW_H + SVC_GAP
+        for service_key in service_orders[biz_key]:
+            service_nodes = group_services[biz_key][service_key]
+            service_y = base_y + service_offsets[biz_key][service_key]
+            row_count = ((len(service_nodes) + MAX_ROW_NODES - 1)
+                         // MAX_ROW_NODES)
+            for row_index in range(row_count):
+                row_nodes = service_nodes[
+                    row_index * MAX_ROW_NODES:(row_index + 1) * MAX_ROW_NODES
+                ]
+                span = (len(row_nodes) - 1) * NODE_W
+                start_x = base_x + (content_w - span) / 2
+                y_pos = service_y + row_index * ROW_H
+                for column_index, node_id in enumerate(row_nodes):
+                    positions[node_id] = {
+                        "x": round(start_x + column_index * NODE_W, 1),
+                        "y": round(y_pos, 1),
+                    }
 
     return positions
 
@@ -935,13 +925,13 @@ def _make_cytoscape_style():
                 "shape": "roundrectangle",
             }
         },
-        # 服务组内的 resource_name 使用固定尺寸卡片并显示在框内
+        # 聚合资源固定显示两行：服务统称 + 截短后的 resource_name
         {
-            "selector": "node[service_container][is_summary = 0]",
+            "selector": "node[is_grouped_resource = 1][is_summary = 0]",
             "style": {
-                "label": "data(name)",
-                "width": 132,
-                "height": 50,
+                "label": "data(display_label)",
+                "width": 170,
+                "height": 58,
                 "shape": "roundrectangle",
                 "background-opacity": 0.14,
                 "font-size": 10,
@@ -950,7 +940,7 @@ def _make_cytoscape_style():
                 "text-halign": "center",
                 "text-margin-y": 0,
                 "text-background-opacity": 0,
-                "text-max-width": "120px",
+                "text-max-width": "158px",
                 "text-wrap": "wrap",
                 "color": "#2C3E50",
             }

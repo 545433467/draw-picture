@@ -25,6 +25,28 @@ def element_data(elements, group):
 
 
 class BuildGraphAggregationTests(unittest.TestCase):
+    def test_long_resource_name_uses_two_line_compact_label(self):
+        long_name = "ecs-production-payment-service-with-a-very-long-instance-name"
+
+        elements = build_graph([
+            make_record(long_name, service_type="ecs")
+        ])
+        node = next(data for data in element_data(elements, "nodes")
+                    if not data.get("is_container"))
+
+        label_lines = node["display_label"].splitlines()
+        self.assertEqual(label_lines[0], "ECS")
+        self.assertEqual(len(label_lines), 2)
+        self.assertTrue(label_lines[1].endswith("..."))
+        self.assertEqual(node["name"], long_name)
+
+        custom_elements = build_graph([
+            make_record("node-1", service_type="extremely_long_custom_cloud_service")
+        ])
+        custom_node = next(data for data in element_data(custom_elements, "nodes")
+                           if not data.get("is_container"))
+        self.assertTrue(custom_node["display_label"].splitlines()[0].endswith("..."))
+
     def test_collapses_resources_after_first_five(self):
         records = [make_record(f"cce-node-{i}") for i in range(1, 1004)]
 
@@ -89,6 +111,46 @@ class BuildGraphAggregationTests(unittest.TestCase):
         elements = build_graph([make_record(f"cce-node-{i}") for i in range(1, 8)])
 
         self.assertEqual(element_data(elements, "edges"), [])
+
+    def test_unassigned_resources_get_service_business_and_aggregation(self):
+        records = [make_record(f"waf-node-{i}", business="", service_type="waf")
+                   for i in range(1, 9)]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        business = next(node for node in nodes if node.get("type") == "__business__")
+        resources = [node for node in nodes if not node.get("is_container")]
+        summary = next(node for node in resources if node.get("is_summary"))
+
+        self.assertEqual(business["name"], "WAF")
+        self.assertEqual(business["is_virtual_business"], 1)
+        self.assertEqual(business["resource_total"], 8)
+        self.assertFalse(any(node.get("type") == "__service__" for node in nodes))
+        self.assertEqual(len(resources), MAX_VISIBLE_SERVICE_NODES + 1)
+        self.assertEqual(summary["name"], "...+3")
+        self.assertTrue(all(node.get("parent") == business["id"]
+                            for node in resources))
+
+    def test_same_service_nodes_form_one_contiguous_layout_block(self):
+        records = [
+            make_record("ecs-1", service_type="ecs", targets="rds-1"),
+            make_record("rds-1", service_type="rds", targets="ecs-2"),
+            make_record("ecs-2", service_type="ecs"),
+            make_record("ecs-3", service_type="ecs"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        positions = compute_bdat_positions(elements)
+        ecs_nodes = [node for node in nodes if node.get("service_key") == "ecs"
+                     and not node.get("is_container")]
+        rds_nodes = [node for node in nodes if node.get("service_key") == "rds"
+                     and not node.get("is_container")]
+
+        self.assertEqual(len({node["parent"] for node in ecs_nodes}), 1)
+        ecs_y = [positions[node["id"]]["y"] for node in ecs_nodes]
+        rds_y = [positions[node["id"]]["y"] for node in rds_nodes]
+        self.assertTrue(max(ecs_y) < min(rds_y) or max(rds_y) < min(ecs_y))
 
 
 if __name__ == "__main__":
