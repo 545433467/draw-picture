@@ -3,7 +3,8 @@ import unittest
 from converter import MAX_VISIBLE_SERVICE_NODES, build_graph, compute_bdat_positions
 
 
-def make_record(name, business="业务A", service_type="cce_deploym", targets=""):
+def make_record(name, business="业务A", service_type="cce_deploym", targets="",
+                inferred_targets=""):
     return {
         "name": name,
         "type": service_type,
@@ -15,7 +16,7 @@ def make_record(name, business="业务A", service_type="cce_deploym", targets=""
         "desc": "",
         "spec": "",
         "targets": targets,
-        "inferred_targets": "",
+        "inferred_targets": inferred_targets,
         "reason": "",
     }
 
@@ -224,6 +225,59 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertIn((node_ids["ecs-prod"], node_ids["obs-prod"]), endpoints)
         self.assertIn((node_ids["obs-prod"], node_ids["elb-prod"]), endpoints)
         self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
+
+    def test_inferred_type_and_business_references_connect_service_groups(self):
+        records = [
+            make_record(
+                "ecs-billing", business="billing-prod", service_type="ecs",
+                inferred_targets=(
+                    "rds-billing-prod,dcs_billing_prod,"
+                    "redis-billing-prod,dds_billing-prod"
+                ),
+            ),
+            make_record("rds-main", business="billing-prod", service_type="rds_mysql"),
+            make_record("dcs-main", business="billing-prod", service_type="dcs_redis"),
+            make_record("dds-main", business="billing-prod", service_type="dds"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        edges = element_data(elements, "edges")
+        node_ids = {node["name"]: node["id"] for node in nodes
+                    if not node.get("is_container")}
+        edge_by_target = {edge["target"]: edge for edge in edges}
+
+        self.assertEqual(len(edges), 3)
+        self.assertEqual(edge_by_target[node_ids["rds-main"]]["call_count"], 1)
+        self.assertEqual(edge_by_target[node_ids["dcs-main"]]["call_count"], 2)
+        self.assertEqual(edge_by_target[node_ids["dds-main"]]["call_count"], 1)
+        self.assertTrue(all(edge["inferred"] == 1 for edge in edges))
+        self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
+        self.assertTrue(all(edge["color"] == "#8E44AD" for edge in edges))
+        self.assertIn("（推断）", edge_by_target[node_ids["dcs-main"]]["relation"])
+
+    def test_inferred_service_prefix_resolves_resource_and_external_target(self):
+        records = [
+            make_record(
+                "api-entry", business="业务A", service_type="apig",
+                inferred_targets="Service:payment-api；Service：external-k8s-api",
+            ),
+            make_record("payment-api", business="业务A", service_type="ecs"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        edges = element_data(elements, "edges")
+        payment = next(node for node in nodes if node.get("name") == "payment-api")
+        external = next(node for node in nodes
+                        if node.get("name") == "external-k8s-api")
+        edge_by_name = {edge["target_name"]: edge for edge in edges}
+
+        self.assertEqual(len(edges), 2)
+        self.assertEqual(edge_by_name["payment-api"]["target"], payment["id"])
+        self.assertEqual(edge_by_name["external-k8s-api"]["target"], external["id"])
+        self.assertTrue(external["is_external"])
+        self.assertTrue(all(edge["inferred"] == 1 for edge in edges))
 
     def test_placeholder_filter_does_not_remove_real_names_containing_na(self):
         records = [

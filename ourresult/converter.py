@@ -406,6 +406,20 @@ def build_graph(records):
         service_aliases[name_key(key)] = key
         service_aliases[name_key(display_name)] = key
 
+    def service_key_matches(candidate_key, requested_key):
+        candidate_key = name_key(candidate_key)
+        requested_key = name_key(requested_key)
+        if requested_key in {"dcs", "redis"}:
+            return any(
+                candidate_key == key
+                or candidate_key.startswith(key + "_")
+                or candidate_key.startswith(key + "-")
+                for key in ("dcs", "redis")
+            )
+        return (candidate_key == requested_key
+                or candidate_key.startswith(requested_key + "_")
+                or candidate_key.startswith(requested_key + "-"))
+
     def resolve_target_entry(source_entry, target_name, candidate_entries,
                              candidate_name_map):
         """优先解析同业务同名资源，也支持 RDS/DCS 等服务统称引用。"""
@@ -421,7 +435,65 @@ def build_graph(records):
         if service_key:
             for candidate in candidate_entries:
                 if (candidate["data"]["business_key"] == source_biz
-                        and candidate["data"]["service_key"] == service_key):
+                        and service_key_matches(
+                            candidate["data"]["service_key"], service_key
+                        )):
+                    return candidate
+        return None
+
+    def parse_inferred_reference(value):
+        """解析 Service:名称 或 服务类型-业务名 两种推断引用。"""
+        text = str(value or "").strip()
+        service_match = re.match(r"^service\s*[:：]\s*(.+)$", text, re.IGNORECASE)
+        if service_match:
+            return {
+                "kind": "resource_name",
+                "target_name": service_match.group(1).strip(),
+            }
+
+        typed_match = re.match(
+            r"^(dcs|rds|dds|redis)[-_](.+)$", text, re.IGNORECASE
+        )
+        if typed_match:
+            return {
+                "kind": "business_service",
+                "service_key": typed_match.group(1).casefold(),
+                "business": typed_match.group(2).strip(),
+                "target_name": text,
+            }
+        return {"kind": "resource_name", "target_name": text}
+
+    def business_reference_key(value):
+        return re.sub(r"[\s_-]+", "", str(value or "")).casefold()
+
+    def resolve_inferred_target_entry(source_entry, target_name,
+                                      candidate_entries, candidate_name_map):
+        reference = parse_inferred_reference(target_name)
+        if reference["kind"] == "resource_name":
+            return resolve_target_entry(
+                source_entry, reference["target_name"],
+                candidate_entries, candidate_name_map,
+            )
+
+        # 资源名恰好符合 rds-xxx 等格式时，精确名称优先。
+        direct_target = resolve_target_entry(
+            source_entry, target_name, candidate_entries, candidate_name_map
+        )
+        if direct_target:
+            return direct_target
+
+        requested_service = reference["service_key"]
+        service_keys = (["dcs", "redis"] if requested_service in {"dcs", "redis"}
+                        else [requested_service])
+        requested_business = business_reference_key(reference["business"])
+        for service_key in service_keys:
+            for candidate in candidate_entries:
+                candidate_business = candidate["data"].get("business", "")
+                if (service_key_matches(
+                            candidate["data"]["service_key"], service_key
+                        )
+                        and business_reference_key(candidate_business)
+                        == requested_business):
                     return candidate
         return None
 
@@ -456,19 +528,34 @@ def build_graph(records):
     real_entries = list(entries)
     real_name_map = build_name_map(real_entries)
     external_specs = {}
+
+    def register_external_target(source_entry, target_name):
+        key = name_key(target_name)
+        spec = external_specs.setdefault(key, {
+            "name": target_name,
+            "service_key": "default",
+        })
+        inferred_key = infer_external_service_key(source_entry, target_name)
+        if inferred_key != "default":
+            spec["service_key"] = inferred_key
+
     for source_entry in real_entries:
         for target_name in split_target_names(source_entry["record"]["targets"]):
             if resolve_target_entry(source_entry, target_name,
                                     real_entries, real_name_map):
                 continue
-            key = name_key(target_name)
-            spec = external_specs.setdefault(key, {
-                "name": target_name,
-                "service_key": "default",
-            })
-            inferred_key = infer_external_service_key(source_entry, target_name)
-            if inferred_key != "default":
-                spec["service_key"] = inferred_key
+            register_external_target(source_entry, target_name)
+
+        for target_name in split_target_names(
+                source_entry["record"]["inferred_targets"]):
+            if resolve_inferred_target_entry(
+                    source_entry, target_name, real_entries, real_name_map):
+                continue
+            reference = parse_inferred_reference(target_name)
+            # 服务类型-业务名是对现有服务组的引用，找不到时不创建伪资源。
+            if reference["kind"] == "business_service":
+                continue
+            register_external_target(source_entry, reference["target_name"])
 
     for spec in external_specs.values():
         inferred_business = infer_external_business(
@@ -649,11 +736,14 @@ def build_graph(records):
         if key in edge_lookup:
             edge_data = edge_lookup[key]
             edge_data["call_count"] += 1
-            edge_data["relation"] = f"{relation} ×{edge_data['call_count']}"
+            relation_label = relation + ("（推断）" if inferred else "")
+            edge_data["relation"] = (
+                f"{relation_label} ×{edge_data['call_count']}"
+            )
             return
         color = RELATION_COLORS.get(relation, RELATION_COLORS["default"])
         if inferred:
-            color = "#AAAAAA"
+            color = "#8E44AD"
         if cross_biz and not inferred:
             color = "#E67E22"
         eid = f"e_{edge_count[0]}"
@@ -675,6 +765,22 @@ def build_graph(records):
 
     for source_entry in real_entries:
         r = source_entry["record"]
+
+        def connect_target(target_entry, target_name, inferred=False):
+            source_biz = source_entry["data"]["business_key"]
+            target_biz = target_entry["data"]["business_key"]
+            cross_biz = bool(source_biz and target_biz and source_biz != target_biz)
+            if cross_biz:
+                src_id = representative_endpoint(source_entry)
+                tgt_id = representative_endpoint(target_entry)
+            else:
+                src_id = internal_endpoint(source_entry)
+                tgt_id = internal_endpoint(target_entry)
+            add_edge(
+                src_id, tgt_id, r["name"], target_name, cross_biz,
+                inferred=inferred,
+            )
+
         # 确认下游
         if r["targets"]:
             for t in split_target_names(r["targets"]):
@@ -683,16 +789,20 @@ def build_graph(records):
                 )
                 if not target_entry:
                     continue
-                source_biz = source_entry["data"]["business_key"]
-                target_biz = target_entry["data"]["business_key"]
-                cross_biz = bool(source_biz and target_biz and source_biz != target_biz)
-                if cross_biz:
-                    src_id = representative_endpoint(source_entry)
-                    tgt_id = representative_endpoint(target_entry)
-                else:
-                    src_id = internal_endpoint(source_entry)
-                    tgt_id = internal_endpoint(target_entry)
-                add_edge(src_id, tgt_id, r["name"], t, cross_biz)
+                connect_target(target_entry, t)
+
+        # 推断下游使用紫色虚线，并支持服务类型-业务名与 Service:资源名。
+        if r["inferred_targets"]:
+            for t in split_target_names(r["inferred_targets"]):
+                reference = parse_inferred_reference(t)
+                target_entry = resolve_inferred_target_entry(
+                    source_entry, t, entries, name_entry_map
+                )
+                if not target_entry:
+                    continue
+                connect_target(
+                    target_entry, reference["target_name"], inferred=True
+                )
 
     return nodes + edges
 
@@ -977,8 +1087,8 @@ def _make_cytoscape_style():
                 "width": 1.5,
                 "line-style": "dashed",
                 "line-dash-pattern": [6, 4],
-                "line-color": "#AAAAAA",
-                "target-arrow-color": "#AAAAAA",
+                "line-color": "data(color)",
+                "target-arrow-color": "data(color)",
                 "target-arrow-shape": "triangle",
                 "curve-style": "bezier",
                 "font-size": 9,
@@ -1210,7 +1320,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 .legend-dot{{width:12px;height:12px;display:inline-block;border:2px solid;flex-shrink:0}}
 .infer-legend{{display:flex;align-items:center;gap:6px;font-size:11px;
   color:#888;margin-bottom:3px}}
-.infer-line{{width:24px;height:2px;border-top:2px dashed #AAAAAA}}
+.infer-line{{width:24px;height:2px;border-top:2px dashed #8E44AD}}
 /* ── toast ── */
 #toast{{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
   background:#333;color:#fff;padding:8px 20px;border-radius:20px;
@@ -1236,7 +1346,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <div class="stats-bar">
     <span class="stat-item"><span class="stat-dot" style="background:#3498DB"></span>{resource_stat}</span>
     <span class="stat-item"><span class="stat-dot" style="background:#27AE60"></span>{n_edges - n_infer} 确认边</span>
-    <span class="stat-item"><span class="stat-dot" style="background:#AAA"></span>{n_infer} 推断边</span>
+    <span class="stat-item"><span class="stat-dot" style="background:#8E44AD"></span>{n_infer} 推断边</span>
   </div>
 </div>
 
@@ -1317,7 +1427,7 @@ cy.on('tap', 'edge', function(evt) {{
   panel.innerHTML =
     '<div class="d-row"><div class="d-label">连接类型</div>' +
     '<div class="d-value">' + (inferred
-      ? '<span style="color:#E74C3C">推断连接（虚线）</span>'
+      ? '<span style="color:#8E44AD">推断连接（紫色虚线）</span>'
       : '<span style="color:#27AE60">已确认连接</span>') + '</div></div>' +
     '<div class="d-row"><div class="d-label">关系</div>' +
     '<div class="d-value">' + (d.relation || '-') + '</div></div>' +
