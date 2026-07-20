@@ -9,7 +9,7 @@ from converter import (
 
 
 def make_record(name, business="业务A", service_type="cce_deploym", targets="",
-                inferred_targets=""):
+                inferred_targets="", reason=""):
     return {
         "name": name,
         "type": service_type,
@@ -22,7 +22,7 @@ def make_record(name, business="业务A", service_type="cce_deploym", targets=""
         "spec": "",
         "targets": targets,
         "inferred_targets": inferred_targets,
-        "reason": "",
+        "reason": reason,
     }
 
 
@@ -344,6 +344,37 @@ class BuildGraphAggregationTests(unittest.TestCase):
         )
         self.assertTrue(all(edge["inferred"] == 1 for edge in edges))
         self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
+
+    def test_inferred_reason_chain_connects_existing_business_services(self):
+        records = [
+            make_record(
+                "vpc-main", service_type="vpc",
+                reason=(
+                    "网络分析；下游（推断）：VPC->数据->CCE=>消息=>DMS"
+                    "→缓存->dcs-业务A->RDS。其他说明"
+                ),
+            ),
+            make_record("cce-main", service_type="cce"),
+            make_record("dms-main", service_type="dms"),
+            make_record("dcs-main", service_type="dcs"),
+            make_record("rds-main", service_type="rds"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        edges = element_data(elements, "edges")
+        node_ids = {node["name"]: node["id"] for node in nodes
+                    if not node.get("is_container")}
+        endpoints = {(edge["source"], edge["target"]) for edge in edges}
+
+        self.assertEqual(len(edges), 4)
+        self.assertIn((node_ids["vpc-main"], node_ids["cce-main"]), endpoints)
+        self.assertIn((node_ids["cce-main"], node_ids["dms-main"]), endpoints)
+        self.assertIn((node_ids["dms-main"], node_ids["dcs-main"]), endpoints)
+        self.assertIn((node_ids["dcs-main"], node_ids["rds-main"]), endpoints)
+        self.assertTrue(all(edge["inferred"] == 1 for edge in edges))
+        self.assertFalse(any(node.get("name") in {"数据", "消息", "缓存"}
+                             for node in nodes))
 
     def test_placeholder_filter_does_not_remove_real_names_containing_na(self):
         records = [

@@ -258,6 +258,31 @@ def split_target_names(value):
             if part.strip() and not is_filtered_node(part.strip())]
 
 
+def extract_inferred_reason_chains(value):
+    """提取推断原因中“下游(推断)：A->B”形式的链路。"""
+    text = str(value or "")
+    marker = re.compile(
+        r"下游\s*[（(]\s*推断\s*[）)]\s*[:：]\s*",
+        re.IGNORECASE,
+    )
+    matches = list(marker.finditer(text))
+    chains = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        segment = text[match.end():end]
+        segment = re.split(r"[\r\n;；。]", segment, maxsplit=1)[0].strip()
+        if not re.search(r"(?:-+>|=+>|→|⇒|➜)", segment):
+            continue
+        parts = [
+            part.strip()
+            for part in re.split(r"\s*(?:-+>|=+>|→|⇒|➜)\s*", segment)
+            if part.strip()
+        ]
+        if len(parts) >= 2:
+            chains.append(parts)
+    return chains
+
+
 def canonical_business_name(value):
     """生成业务身份键，合并大小写及常见分隔符差异。"""
     text = str(value or "").strip()
@@ -536,6 +561,52 @@ def build_graph(records):
                 return candidate
         return None
 
+    def resolve_reason_chain_entry(source_entry, token, candidate_entries,
+                                   candidate_name_map):
+        """解析原因链路节点；描述性中间词无法命中时返回 None。"""
+        cleaned_token = str(token or "").strip().strip("-_ ")
+        if not cleaned_token:
+            return None
+
+        marker_parts = [
+            part.casefold()
+            for part in re.split(r"[-_.:/,，、;；()（）\[\]\s]+", cleaned_token)
+            if part
+        ]
+        marker_key = ""
+        for part in marker_parts:
+            if part == "dsc":
+                marker_key = "dcs"
+                break
+            service_key = service_aliases.get(part)
+            if service_key and service_key != "default":
+                marker_key = service_key
+                break
+
+        # 链路首段若是当前资源的服务统称，应锚定当前行而非同组首节点。
+        if marker_key and service_key_matches(
+                source_entry["data"]["service_key"], marker_key):
+            exact_candidates = candidate_name_map.get(name_key(cleaned_token), [])
+            if not exact_candidates:
+                return source_entry
+
+        target_entry = resolve_inferred_target_entry(
+            source_entry, cleaned_token, candidate_entries, candidate_name_map
+        )
+        if target_entry:
+            return target_entry
+        if not marker_key:
+            return None
+
+        source_biz = source_entry["data"]["business_key"]
+        for candidate in candidate_entries:
+            if (candidate["data"]["business_key"] == source_biz
+                    and service_key_matches(
+                        candidate["data"]["service_key"], marker_key
+                    )):
+                return candidate
+        return None
+
     def infer_external_service_key(source_entry, target_name):
         service_key = get_service_key(target_name, "default")
         if service_key != "default":
@@ -802,22 +873,29 @@ def build_graph(records):
         edge_lookup[key] = edge_data
         edges.append({"group": "edges", "data": edge_data})
 
+    def connect_entries(source_entry, target_entry, source_name, target_name,
+                        inferred=False):
+        source_biz = source_entry["data"]["business_key"]
+        target_biz = target_entry["data"]["business_key"]
+        cross_biz = bool(source_biz and target_biz and source_biz != target_biz)
+        if cross_biz:
+            src_id = representative_endpoint(source_entry)
+            tgt_id = representative_endpoint(target_entry)
+        else:
+            src_id = internal_endpoint(source_entry)
+            tgt_id = internal_endpoint(target_entry)
+        add_edge(
+            src_id, tgt_id, source_name, target_name, cross_biz,
+            inferred=inferred,
+        )
+
     for source_entry in real_entries:
         r = source_entry["record"]
 
         def connect_target(target_entry, target_name, inferred=False):
-            source_biz = source_entry["data"]["business_key"]
-            target_biz = target_entry["data"]["business_key"]
-            cross_biz = bool(source_biz and target_biz and source_biz != target_biz)
-            if cross_biz:
-                src_id = representative_endpoint(source_entry)
-                tgt_id = representative_endpoint(target_entry)
-            else:
-                src_id = internal_endpoint(source_entry)
-                tgt_id = internal_endpoint(target_entry)
-            add_edge(
-                src_id, tgt_id, r["name"], target_name, cross_biz,
-                inferred=inferred,
+            connect_entries(
+                source_entry, target_entry, r["name"], target_name,
+                inferred,
             )
 
         # 确认下游
@@ -841,6 +919,26 @@ def build_graph(records):
                     continue
                 connect_target(
                     target_entry, reference["target_name"], inferred=True
+                )
+
+        # 推断原因中的明确链路：跳过无法对应资源的描述段，连接可识别节点。
+        for chain in extract_inferred_reason_chains(r["reason"]):
+            path = [(source_entry, r["name"])]
+            for token in chain:
+                chain_entry = resolve_reason_chain_entry(
+                    source_entry, token, entries, name_entry_map
+                )
+                if not chain_entry:
+                    continue
+                if path[-1][0]["index"] == chain_entry["index"]:
+                    continue
+                path.append((chain_entry, token))
+
+            for (chain_source, source_name), (chain_target, target_name) in zip(
+                    path, path[1:]):
+                connect_entries(
+                    chain_source, chain_target, source_name, target_name,
+                    inferred=True,
                 )
 
     return nodes + edges
