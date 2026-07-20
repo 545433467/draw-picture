@@ -158,6 +158,9 @@ def get_service_display_name(service_key):
 # 这些类型作为 compound 容器节点（自动生成，不直接来自行数据）
 _VIRTUAL_CONTAINER_TYPES = {"__region__", "__group__", "__business__"}
 
+# 同一业务、同一服务类型最多渲染的真实资源数。其余资源合并为一个摘要节点。
+MAX_VISIBLE_SERVICE_NODES = 5
+
 # 业务容器的调色板（背景, 边框, 标题色）——按顺序循环分配给各业务
 BUSINESS_PALETTE = [
     ("#E8F8F5", "#1ABC9C", "#0E6655"),   # 青绿
@@ -301,27 +304,28 @@ def build_graph(records):
 
     nodes = []
     edges = []
-    edge_set = set()
-    node_id_map = {}   # resource_name → node_id
+    edge_lookup = {}
     edge_count = [0]
 
-    # ── 1. 创建资源叶节点 ──────────────────────────────────────────────────
+    # ── 1. 规划资源可见性 ──────────────────────────────────────────────────
+    # 聚合键是 (所属业务, 服务类型)。未填写业务的资源保持原样，避免把无归属资源
+    # 意外合并。记录条目仍保留在内存中供连线解析，但只有前 5 个会写入 HTML。
+
+    entries = []
+    service_groups = defaultdict(list)
+    name_entry_map = {}
 
     for i, r in enumerate(records):
         nid = f"n_{safe_id(r['name'])}_{i}"
-        if r["name"] not in node_id_map:
-            node_id_map[r["name"]] = nid
-
         stype = r["type"] or "default"
         bg, border, shape = SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
-
         reg = (r["region"]   or "").strip()
         grp = (r["group"]    or "").strip()
         biz = (r["business"] or "").strip()
-
         svc_key = get_service_key(r["name"], stype)
+        group_key = (biz, svc_key) if biz else None
 
-        d = {
+        data = {
             "id":            nid,
             "name":          r["name"],
             "type":          stype,
@@ -338,8 +342,69 @@ def build_graph(records):
             "border_color":  border,
             "shape":         shape,
             "is_container":  0,
+            "is_summary":    0,
         }
-        nodes.append({"group": "nodes", "data": d})
+        entry = {
+            "index": i,
+            "record": r,
+            "data": data,
+            "group_key": group_key,
+        }
+        entries.append(entry)
+        name_entry_map.setdefault(r["name"], entry)
+        if group_key:
+            service_groups[group_key].append(entry)
+
+    visible_indexes = {entry["index"] for entry in entries if not entry["group_key"]}
+    group_info = {}
+    for group_index, (group_key, group_entries) in enumerate(service_groups.items()):
+        visible_entries = group_entries[:MAX_VISIBLE_SERVICE_NODES]
+        hidden_entries = group_entries[MAX_VISIBLE_SERVICE_NODES:]
+        visible_indexes.update(entry["index"] for entry in visible_entries)
+        group_info[group_key] = {
+            "entries": group_entries,
+            "visible": visible_entries,
+            "hidden": hidden_entries,
+            "first_id": visible_entries[0]["data"]["id"],
+            "summary_id": "",
+            "group_index": group_index,
+        }
+
+    for entry in entries:
+        if entry["index"] in visible_indexes:
+            nodes.append({"group": "nodes", "data": entry["data"]})
+
+    # 每个超限组只增加一个摘要节点；摘要节点承接组内隐藏资源的连线。
+    for group_key, info in group_info.items():
+        hidden_count = len(info["hidden"])
+        if not hidden_count:
+            continue
+        biz, svc_key = group_key
+        summary_id = f"summary_{info['group_index']}"
+        info["summary_id"] = summary_id
+        bg, border, _ = SERVICE_STYLE.get(svc_key, SERVICE_STYLE["default"])
+        nodes.append({"group": "nodes", "data": {
+            "id":              summary_id,
+            "name":            f"...+{hidden_count}",
+            "type":            "__summary__",
+            "service_key":     svc_key,
+            "service_name":    get_service_display_name(svc_key),
+            "business":        biz,
+            "collapsed_count": hidden_count,
+            "resource_total":  len(info["entries"]),
+            "spec":            "",
+            "desc":            "其余同类资源已折叠显示",
+            "resource_id":     "",
+            "enterprise_id":   "",
+            "region":          "",
+            "group_label":     "",
+            "reason":          "",
+            "bg_color":        bg,
+            "border_color":    border,
+            "shape":           "roundrectangle",
+            "is_container":    0,
+            "is_summary":      1,
+        }})
 
     # ── 2. 创建业务容器节点，为叶节点设置 parent ─────────────────────────
 
@@ -367,47 +432,39 @@ def build_graph(records):
             "text_color":   text,
             "shape":        "roundrectangle",
         }})
-    nodes = biz_containers + nodes
-
     # ── 2.6 在业务容器内按服务类型创建子容器 ──────────────────────────────
-    # 统计每个 (biz, service_key) 组合的节点数，≥2 才建子容器
-
-    biz_svc_nodes = defaultdict(lambda: defaultdict(list))   # {biz_id: {svc_key: [node]}}
-    for n in nodes:
-        d = n["data"]
-        if d.get("is_container"):
-            continue
-        biz_pid = d.get("parent", "")
-        svc_key = d.get("service_key", "default")
-        if biz_pid.startswith("biz_"):
-            biz_svc_nodes[biz_pid][svc_key].append(n)
-
     service_containers = []
-    for biz_id, svc_groups in biz_svc_nodes.items():
-        for svc_key, svc_nodes in svc_groups.items():
-            if len(svc_nodes) < 2:
-                continue
-            sc_id = f"sc_{biz_id}_{safe_id(svc_key)}"
-            display_name = get_service_display_name(svc_key)
-            service_containers.append({"group": "nodes", "data": {
-                "id":           sc_id,
-                "name":         display_name,
-                "type":         "__service__",
-                "is_container": 1,
-                "parent":       biz_id,
-                "bg_color":     "#F2F3F4",
-                "border_color": "#7F8C8D",
-                "shape":        "roundrectangle",
-            }})
-            for n in svc_nodes:
-                n["data"]["parent"]           = sc_id
-                n["data"]["service_container"] = sc_id
+    node_by_id = {node["data"]["id"]: node for node in nodes}
+    for (biz, svc_key), info in service_groups.items():
+        if len(info) < 2:
+            continue
+        biz_id = business_map[biz]
+        sc_id = f"sc_{biz_id}_{safe_id(svc_key)}"
+        group_meta = group_info[(biz, svc_key)]
+        service_containers.append({"group": "nodes", "data": {
+            "id":              sc_id,
+            "name":            get_service_display_name(svc_key),
+            "type":            "__service__",
+            "service_key":     svc_key,
+            "resource_total":  len(info),
+            "visible_count":   len(group_meta["visible"]),
+            "collapsed_count": len(group_meta["hidden"]),
+            "is_container":    1,
+            "parent":          biz_id,
+            "bg_color":        "#F2F3F4",
+            "border_color":    "#7F8C8D",
+            "shape":           "roundrectangle",
+        }})
+        rendered_ids = {entry["data"]["id"] for entry in group_meta["visible"]}
+        if group_meta["summary_id"]:
+            rendered_ids.add(group_meta["summary_id"])
+        for node_id in rendered_ids:
+            node = node_by_id.get(node_id)
+            if node:
+                node["data"]["parent"] = sc_id
+                node["data"]["service_container"] = sc_id
 
-    nodes = biz_containers + service_containers + [n for n in nodes if not n["data"].get("type", "").startswith("__business__")]
-
-    # 建立 node_id → business 的映射，供跨业务边标记用
-    node_biz_map = {n["data"]["id"]: n["data"].get("business", "")
-                    for n in nodes if not n["data"].get("is_container")}
+    nodes = biz_containers + service_containers + nodes
 
     # ── 3. 解析外部节点（targets 中不存在的名称）─────────────────────────
 
@@ -415,60 +472,86 @@ def build_graph(records):
 
     def ensure_ext_node(name):
         """目标名不在记录中时，创建外部虚拟节点"""
-        if name in node_id_map:
-            return node_id_map[name]
         ext_id = f"n_ext_{safe_id(name)}"
         if ext_id not in all_node_ids:
             bg, border, shape = SERVICE_STYLE["default"]
             nodes.append({"group": "nodes", "data": {
                 "id": ext_id, "name": name,
-                "type": "default", "is_container": False,
+                "type": "default", "service_key": "default",
+                "business": "", "is_container": 0, "is_summary": 0,
                 "bg_color": bg, "border_color": border, "shape": shape,
                 "spec": "", "desc": "（外部/未列出服务）",
                 "resource_id": "", "enterprise_id": "",
                 "region": "", "group_label": "", "reason": "",
             }})
             all_node_ids.add(ext_id)
-        node_id_map[name] = ext_id
         return ext_id
 
     # ── 4. 创建边 ─────────────────────────────────────────────────────────
 
-    def add_edge(src_id, tgt_name, relation, inferred=False):
-        tgt_id = ensure_ext_node(tgt_name)
+    def internal_endpoint(entry):
+        """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
+        if entry["index"] in visible_indexes:
+            return entry["data"]["id"]
+        return group_info[entry["group_key"]]["summary_id"]
+
+    def representative_endpoint(entry):
+        """跨业务边统一落到对应服务组的第一个真实资源节点。"""
+        if entry["group_key"]:
+            return group_info[entry["group_key"]]["first_id"]
+        return entry["data"]["id"]
+
+    def add_edge(src_id, tgt_id, source_name, target_name, cross_biz,
+                 relation="调用", inferred=False):
         key = (src_id, tgt_id, inferred)
-        if key in edge_set:
+        if key in edge_lookup:
+            edge_data = edge_lookup[key]
+            edge_data["call_count"] += 1
+            edge_data["relation"] = f"{relation} ×{edge_data['call_count']}"
             return
-        edge_set.add(key)
         color = RELATION_COLORS.get(relation, RELATION_COLORS["default"])
         if inferred:
             color = "#AAAAAA"
-        src_biz = node_biz_map.get(src_id, "")
-        tgt_biz = node_biz_map.get(tgt_id, "")
-        cross_biz = 1 if (src_biz and tgt_biz and src_biz != tgt_biz) else 0
         if cross_biz and not inferred:
             color = "#E67E22"
         eid = f"e_{edge_count[0]}"
         edge_count[0] += 1
-        edges.append({"group": "edges", "data": {
+        edge_data = {
             "id":            eid,
             "source":        src_id,
             "target":        tgt_id,
+            "source_name":   source_name,
+            "target_name":   target_name,
             "relation":      relation + ("（推断）" if inferred else ""),
+            "call_count":    1,
             "color":         color,
             "inferred":      1 if inferred else 0,
-            "cross_business": cross_biz,
-        }})
+            "cross_business": 1 if cross_biz else 0,
+        }
+        edge_lookup[key] = edge_data
+        edges.append({"group": "edges", "data": edge_data})
 
-    for r in records:
-        src_id = node_id_map.get(r["name"])
-        if not src_id:
-            continue
-
+    for source_entry in entries:
+        r = source_entry["record"]
         # 确认下游
         if r["targets"]:
             for t in [x.strip() for x in r["targets"].split(",") if x.strip() and not is_filtered_node(x.strip())]:
-                add_edge(src_id, t, "调用", inferred=False)
+                target_entry = name_entry_map.get(t)
+                if target_entry:
+                    source_biz = source_entry["data"]["business"]
+                    target_biz = target_entry["data"]["business"]
+                    cross_biz = bool(source_biz and target_biz and source_biz != target_biz)
+                    if cross_biz:
+                        src_id = representative_endpoint(source_entry)
+                        tgt_id = representative_endpoint(target_entry)
+                    else:
+                        src_id = internal_endpoint(source_entry)
+                        tgt_id = internal_endpoint(target_entry)
+                else:
+                    cross_biz = False
+                    src_id = internal_endpoint(source_entry)
+                    tgt_id = ensure_ext_node(t)
+                add_edge(src_id, tgt_id, r["name"], t, cross_biz)
 
     return nodes + edges
 
@@ -487,7 +570,7 @@ def compute_bdat_positions(elements):
     SUB_ROW_H        = 140   # 同层内子行垂直间距
     INTER_LAYER_GAP  = 80    # 不同层之间的额外间距
     SVC_GAP          = 70    # 同层内不同服务类型子带之间的垂直间距
-    MAX_ROW_NODES    = 10    # 同层每行最多节点数（超出则换行）
+    MAX_ROW_NODES    = MAX_VISIBLE_SERVICE_NODES  # 每行最多 5 个节点
     GROUP_PAD        = 110   # 业务组内边距
     GAP_X            = 450   # 业务组之间水平间距（拉大：业务边界更清晰）
     GAP_Y            = 380   # 业务组之间垂直间距
@@ -852,6 +935,46 @@ def _make_cytoscape_style():
                 "shape": "roundrectangle",
             }
         },
+        # 服务组内的 resource_name 使用固定尺寸卡片并显示在框内
+        {
+            "selector": "node[service_container][is_summary = 0]",
+            "style": {
+                "label": "data(name)",
+                "width": 132,
+                "height": 50,
+                "shape": "roundrectangle",
+                "background-opacity": 0.14,
+                "font-size": 10,
+                "font-weight": "bold",
+                "text-valign": "center",
+                "text-halign": "center",
+                "text-margin-y": 0,
+                "text-background-opacity": 0,
+                "text-max-width": "120px",
+                "text-wrap": "wrap",
+                "color": "#2C3E50",
+            }
+        },
+        # 被折叠资源的摘要节点
+        {
+            "selector": "node[is_summary = 1]",
+            "style": {
+                "label": "data(name)",
+                "width": 72,
+                "height": 46,
+                "shape": "roundrectangle",
+                "background-opacity": 0.14,
+                "border-style": "dashed",
+                "border-width": 2,
+                "font-size": 12,
+                "font-weight": "bold",
+                "text-valign": "center",
+                "text-halign": "center",
+                "text-margin-y": 0,
+                "text-background-opacity": 0,
+                "color": "#566573",
+            }
+        },
         # 业务容器节点：颜色/文字从 data 属性取，各业务组配色互不相同
         {
             "selector": "node[type = '__business__']",
@@ -934,8 +1057,16 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     default_layout  = "bdat"
 
     # 统计数字
-    n_nodes = sum(1 for e in elements if e.get("group") == "nodes"
-                  and e["data"].get("type") not in ("__region__", "__group__", "__business__", "__service__"))
+    visible_resources = sum(1 for e in elements if e.get("group") == "nodes"
+                            and not e["data"].get("is_container")
+                            and not e["data"].get("is_summary"))
+    summary_nodes = sum(1 for e in elements if e.get("group") == "nodes"
+                        and e["data"].get("is_summary"))
+    collapsed_resources = sum(e["data"].get("collapsed_count", 0) for e in elements
+                              if e.get("group") == "nodes" and e["data"].get("is_summary"))
+    total_resources = visible_resources + collapsed_resources
+    resource_stat = (f"{visible_resources + summary_nodes} 可见 / {total_resources} 资源"
+                     if collapsed_resources else f"{total_resources} 节点")
     n_edges = sum(1 for e in elements if e.get("group") == "edges")
     n_infer = sum(1 for e in elements if e.get("group") == "edges"
                   and e["data"].get("inferred") == 1)
@@ -1021,7 +1152,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <input id="searchBox" type="text" placeholder="&#128269; 搜索节点名/类型…"
          oninput="searchNodes(this.value)"/>
   <div class="stats-bar">
-    <span class="stat-item"><span class="stat-dot" style="background:#3498DB"></span>{n_nodes} 节点</span>
+    <span class="stat-item"><span class="stat-dot" style="background:#3498DB"></span>{resource_stat}</span>
     <span class="stat-item"><span class="stat-dot" style="background:#27AE60"></span>{n_edges - n_infer} 确认边</span>
     <span class="stat-item"><span class="stat-dot" style="background:#AAA"></span>{n_infer} 推断边</span>
   </div>
@@ -1086,6 +1217,8 @@ cy.on('tap', 'node', function(evt) {{
   var bg = d.bg_color || '#888';
   if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__service__') {{
     showContainerDetail(d);
+  }} else if (d.is_summary === 1) {{
+    showSummaryDetail(d);
   }} else {{
     showNodeDetail(d, bg);
   }}
@@ -1107,9 +1240,12 @@ cy.on('tap', 'edge', function(evt) {{
     '<div class="d-row"><div class="d-label">关系</div>' +
     '<div class="d-value">' + (d.relation || '-') + '</div></div>' +
     '<div class="d-row"><div class="d-label">来源</div>' +
-    '<div class="d-value">' + (cy.getElementById(d.source).data('name') || d.source) + '</div></div>' +
+    '<div class="d-value">' + escHtml(d.source_name || cy.getElementById(d.source).data('name') || d.source) + '</div></div>' +
     '<div class="d-row"><div class="d-label">目标</div>' +
-    '<div class="d-value">' + (cy.getElementById(d.target).data('name') || d.target) + '</div></div>';
+    '<div class="d-value">' + escHtml(d.target_name || cy.getElementById(d.target).data('name') || d.target) + '</div></div>' +
+    (d.call_count > 1
+      ? '<div class="d-row"><div class="d-label">合并调用</div><div class="d-value">'+d.call_count+' 条</div></div>'
+      : '');
   document.getElementById('node-type-tag').innerHTML = inferred
     ? '<span class="tag" style="background:#AAA">推断</span>'
     : '<span class="tag" style="background:#27AE60">确认</span>';
@@ -1173,6 +1309,21 @@ function showNodeDetail(d, bg) {{
     '<span class="tag" style="background:'+bg+'">'+((d.type||'').toUpperCase())+'</span>';
 }}
 
+function showSummaryDetail(d) {{
+  var rows = [
+    ['服务类型', d.service_name || d.service_key || '-'],
+    ['所属业务', d.business || '-'],
+    ['省略节点', d.collapsed_count || 0],
+    ['资源总数', d.resource_total || 0],
+  ];
+  document.getElementById('detail-panel').innerHTML = rows.map(function(r) {{
+    return '<div class="d-row"><div class="d-label">'+r[0]+'</div>' +
+           '<div class="d-value">'+escHtml(r[1])+'</div></div>';
+  }}).join('');
+  document.getElementById('node-type-tag').innerHTML =
+    '<span class="tag" style="background:#7F8C8D">省略节点</span>';
+}}
+
 function showContainerDetail(d) {{
   var label = d.type === '__region__' ? '区域'
             : d.type === '__business__' ? '所属业务'
@@ -1186,7 +1337,8 @@ function showContainerDetail(d) {{
   var children = cy.getElementById(d.id).descendants().filter(function(n) {{
     return !n.data('is_container');
   }});
-  html += '<div class="d-row"><div class="d-label">包含服务 ('+children.length+')</div><div class="d-value">';
+  var total = d.resource_total || children.filter(function(n) {{ return !n.data('is_summary'); }}).length;
+  html += '<div class="d-row"><div class="d-label">包含资源 ('+total+')</div><div class="d-value">';
   children.forEach(function(n) {{
     html += '<span style="display:inline-block;margin:2px 2px 0 0;padding:2px 6px;' +
             'background:#E8EAF6;border-radius:4px;font-size:11px;cursor:pointer" ' +
@@ -1320,7 +1472,8 @@ function showToast(msg) {{
 
     size_kb = os.path.getsize(output_path) // 1024
     print(f"已生成: {output_path}  ({size_kb} KB)")
-    print(f"  资源节点: {n_nodes}")
+    print(f"  可见节点: {visible_resources + summary_nodes}")
+    print(f"  资源总数: {total_resources}")
     print(f"  确认连线: {n_edges - n_infer}")
     print(f"  推断连线: {n_infer}")
     print("  用浏览器直接打开即可（无需启动服务器）。")
