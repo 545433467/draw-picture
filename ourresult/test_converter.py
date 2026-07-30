@@ -1,10 +1,15 @@
+import os
+import tempfile
 import unittest
+
+import openpyxl
 
 from converter import (
     MAX_VISIBLE_SERVICE_NODES,
     _make_cytoscape_style,
     build_graph,
     compute_bdat_positions,
+    read_excel,
 )
 
 
@@ -407,6 +412,40 @@ class BuildGraphAggregationTests(unittest.TestCase):
         ecs_y = [positions[node["id"]]["y"] for node in ecs_nodes]
         rds_y = [positions[node["id"]]["y"] for node in rds_nodes]
         self.assertTrue(max(ecs_y) < min(rds_y) or max(rds_y) < min(ecs_y))
+
+    def test_read_excel_filters_non_core_rows_when_core_column_exists(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["服务名称", "服务类型", "所属业务", "是否核心业务"])
+        ws.append(["core-ecs", "ecs", "业务A", "是"])
+        ws.append(["non-core-rds", "rds", "业务A", ""])
+        ws.append(["blank-core-cce", "cce", "业务A", None])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "core-filter.xlsx")
+            wb.save(path)
+            records = read_excel(path)
+
+        self.assertEqual([record["name"] for record in records], ["core-ecs"])
+        self.assertEqual(records[0]["is_core_business"], "是")
+
+    def test_bdat_business_grid_uses_four_columns(self):
+        records = [
+            make_record(f"ecs-{i}", business=f"业务{i}", service_type="ecs")
+            for i in range(1, 6)
+        ]
+
+        elements = build_graph(records)
+        nodes = [
+            node for node in element_data(elements, "nodes")
+            if not node.get("is_container")
+        ]
+        positions = compute_bdat_positions(elements)
+        ordered_positions = [positions[node["id"]] for node in nodes]
+
+        self.assertEqual(len({pos["y"] for pos in ordered_positions[:4]}), 1)
+        self.assertEqual(len({pos["x"] for pos in ordered_positions[:4]}), 4)
+        self.assertGreater(ordered_positions[4]["y"], ordered_positions[0]["y"])
 
 
 if __name__ == "__main__":

@@ -236,6 +236,8 @@ COL_ALIASES = {
                      "infer_reason"],
     "所属业务":     ["所属业务", "业务", "business", "business_name",
                      "app_name", "application", "所属应用", "业务域", "app"],
+    "是否核心业务": ["是否核心业务", "核心业务", "is_core_business",
+                     "core_business", "is core business"],
 }
 
 
@@ -335,6 +337,8 @@ def read_excel(filepath):
         name = get("服务名称")
         if not name or is_filtered_node(name):
             continue
+        if "是否核心业务" in col_map and get("是否核心业务") != "是":
+            continue
 
         records.append({
             "name":            name,
@@ -349,6 +353,7 @@ def read_excel(filepath):
             "targets":         get("下游服务"),
             "inferred_targets":get("下游服务推断"),
             "reason":          get("推断原因"),
+            "is_core_business": get("是否核心业务"),
         })
 
     return records
@@ -961,7 +966,7 @@ def compute_bdat_positions(elements):
     GROUP_PAD     = 110
     GAP_X         = 450
     GAP_Y         = 380
-    MAX_COLS      = 2
+    MAX_COLS      = 4
 
     leaf_nodes = {}
     edges_list = []
