@@ -15,7 +15,7 @@ from converter import (
 
 
 def make_record(name, business="业务A", service_type="cce_deploym", targets="",
-                inferred_targets="", reason=""):
+                inferred_targets="", reason="", source=""):
     return {
         "name": name,
         "type": service_type,
@@ -26,6 +26,7 @@ def make_record(name, business="业务A", service_type="cce_deploym", targets=""
         "business": business,
         "desc": "",
         "spec": "",
+        "source": source,
         "targets": targets,
         "inferred_targets": inferred_targets,
         "reason": reason,
@@ -61,6 +62,10 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
     def test_collapses_resources_after_first_five(self):
         records = [make_record(f"cce-node-{i}") for i in range(1, 1004)]
+        records[5]["enterprise_id"] = "ep-hidden"
+        records[5]["group"] = "hidden-group"
+        records[5]["source"] = "inventory-sheet"
+        records[5]["targets"] = "cce-node-1,cce-node-2"
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
@@ -68,12 +73,21 @@ class BuildGraphAggregationTests(unittest.TestCase):
         service = next(node for node in nodes if node.get("type") == "__service__")
         summary = next(node for node in nodes if node.get("is_summary"))
 
-        self.assertEqual(service["name"], "CCE_DEPLOYM")
+        self.assertEqual(service["name"], "CCE")
         self.assertEqual(service["resource_total"], 1003)
         self.assertEqual(len(resource_nodes), MAX_VISIBLE_SERVICE_NODES + 1)
         self.assertEqual(summary["name"], "...+998")
         self.assertEqual(summary["collapsed_count"], 998)
         self.assertEqual(summary["parent"], service["id"])
+        self.assertEqual(len(summary["summary_resources"]), 998)
+        first_hidden = summary["summary_resources"][0]
+        self.assertEqual(first_hidden["name"], "cce-node-6")
+        self.assertEqual(first_hidden["type"], "CCE_DEPLOYM")
+        self.assertEqual(first_hidden["project"], "ep-hidden")
+        self.assertEqual(first_hidden["business"], "业务A")
+        self.assertEqual(first_hidden["group"], "hidden-group")
+        self.assertEqual(first_hidden["source"], "inventory-sheet")
+        self.assertEqual(first_hidden["downstream"], ["cce-node-1", "cce-node-2"])
 
     def test_cross_business_call_targets_first_resource_in_service_group(self):
         records = [make_record("api-1", business="业务A", service_type="apig",
@@ -161,12 +175,15 @@ class BuildGraphAggregationTests(unittest.TestCase):
         service_containers = [
             node for node in nodes if node.get("type") == "__service__"
         ]
+        node_by_id = {node["id"]: node for node in nodes}
 
         self.assertEqual(len(businesses), 1)
         self.assertEqual(businesses[0]["name"], "lingee-prod")
         self.assertEqual(businesses[0]["resource_total"], 4)
-        self.assertTrue(all(node["parent"] == businesses[0]["id"]
-                            for node in service_containers))
+        self.assertTrue(all(
+            node_by_id[node["parent"]]["parent"] == businesses[0]["id"]
+            for node in service_containers
+        ))
         self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
 
     def test_business_style_wraps_full_name_instead_of_ellipsis(self):
@@ -228,7 +245,12 @@ class BuildGraphAggregationTests(unittest.TestCase):
         )
         service_nodes = [
             node for node in nodes
-            if node.get("type") == "__service__" and node.get("parent") == business["id"]
+            if node.get("type") == "__service__"
+        ]
+        node_by_id = {node["id"]: node for node in nodes}
+        business_service_nodes = [
+            node for node in service_nodes
+            if node_by_id[node["parent"]]["parent"] == business["id"]
         ]
         summaries = [
             node for node in nodes
@@ -240,7 +262,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         ]
 
         self.assertEqual(business["resource_total"], 14)
-        self.assertEqual({node["service_key"] for node in service_nodes},
+        self.assertEqual({node["service_key"] for node in business_service_nodes},
                          {"k8s", "maas"})
         self.assertEqual(len(external_nodes), 10)
         self.assertEqual(len(summaries), 2)

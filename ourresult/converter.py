@@ -303,6 +303,7 @@ COL_ALIASES = {
     "描述":         ["描述", "description", "备注", "说明", "desc", "remark"],
     "规格":         ["规格", "spec", "specification", "配置", "instance_type",
                      "flavor"],
+    "来源":         ["来源", "source", "origin", "来源系统", "source_system"],
     "下游服务":     ["下游服务", "downstream", "downstream_service",
                      "连接目标", "target", "targets", "依赖服务",
                      "下游服务(逗号分隔)", "下游服务（逗号分隔）"],
@@ -424,6 +425,7 @@ def read_excel(filepath):
             "business":        get("所属业务"),
             "desc":            get("描述"),
             "spec":            get("规格"),
+            "source":          get("来源"),
             "targets":         get("下游服务"),
             "inferred_targets":get("下游服务推断"),
             "reason":          get("推断原因"),
@@ -487,6 +489,7 @@ def build_graph(records):
             "enterprise_id": r["enterprise_id"],
             "region":        reg,
             "group_label":   grp,
+            "source":        r.get("source", ""),
             "business":      biz_label,
             "business_key":  biz_key,
             "is_virtual_business": 1 if is_virtual_business else 0,
@@ -763,6 +766,7 @@ def build_graph(records):
             "business": inferred_business,
             "desc": "（外部/未列出服务）",
             "spec": "",
+            "source": "",
             "targets": "",
             "inferred_targets": "",
             "reason": "",
@@ -796,6 +800,23 @@ def build_graph(records):
         if entry["index"] in visible_indexes:
             nodes.append({"group": "nodes", "data": entry["data"]})
 
+    def make_summary_resource(entry):
+        r = entry["record"]
+        d = entry["data"]
+        return {
+            "name": d.get("name", ""),
+            "type": (r.get("type") or d.get("type") or "").upper(),
+            "service_name": get_service_display_name(d.get("service_key", "default")),
+            "project": d.get("enterprise_id", ""),
+            "business": d.get("business", ""),
+            "group": d.get("group_label", ""),
+            "source": d.get("source") or d.get("region", ""),
+            "region": d.get("region", ""),
+            "desc": d.get("desc", ""),
+            "downstream": split_target_names(r.get("targets", "")),
+            "inferred_downstream": split_target_names(r.get("inferred_targets", "")),
+        }
+
     # 每个超限组只增加一个摘要节点；摘要节点承接组内隐藏资源的连线。
     for group_key, info in group_info.items():
         hidden_count = len(info["hidden"])
@@ -820,6 +841,9 @@ def build_graph(records):
             "is_grouped_resource": 1,
             "collapsed_count": hidden_count,
             "resource_total":  len(info["entries"]),
+            "summary_resources": [
+                make_summary_resource(entry) for entry in info["hidden"]
+            ],
             "spec":            "",
             "desc":            "其余同类资源已折叠显示",
             "resource_id":     "",
@@ -1848,10 +1872,32 @@ function showSummaryDetail(d) {{
     ['省略节点', d.collapsed_count || 0],
     ['资源总数', d.resource_total || 0],
   ];
-  document.getElementById('detail-panel').innerHTML = rows.map(function(r) {{
+  var html = rows.map(function(r) {{
     return '<div class="d-row"><div class="d-label">'+r[0]+'</div>' +
            '<div class="d-value">'+escHtml(r[1])+'</div></div>';
   }}).join('');
+  var resources = d.summary_resources || [];
+  if (resources.length > 0) {{
+    html += '<div class="d-row"><div class="d-label">折叠资源明细</div><div class="d-value">';
+    resources.forEach(function(item, index) {{
+      var downstream = (item.downstream || []).join(', ') || '-';
+      var inferredDownstream = (item.inferred_downstream || []).join(', ') || '-';
+      html += '<div style="border:1px solid #E5E7EB;border-radius:4px;padding:7px 8px;margin:6px 0;background:#FAFAFA">';
+      html += '<div style="font-weight:700;color:#2C3E50;margin-bottom:5px">'+(index + 1)+'. '+escHtml(item.name || '-')+'</div>';
+      html += '<div><strong>类型：</strong>'+escHtml(item.service_name || item.type || '-')+'</div>';
+      html += '<div><strong>类型说明：</strong>'+escHtml(item.desc || '-')+'</div>';
+      html += '<div><strong>项目/业务：</strong>'+escHtml((item.project || '-') + ' / ' + (item.business || '-'))+'</div>';
+      html += '<div><strong>分组：</strong>'+escHtml(item.group || '-')+'</div>';
+      html += '<div><strong>来源：</strong>'+escHtml(item.source || '-')+'</div>';
+      html += '<div><strong>下游：</strong>'+escHtml(downstream)+'</div>';
+      if (inferredDownstream !== '-') {{
+        html += '<div><strong>推断下游：</strong>'+escHtml(inferredDownstream)+'</div>';
+      }}
+      html += '</div>';
+    }});
+    html += '</div></div>';
+  }}
+  document.getElementById('detail-panel').innerHTML = html;
   document.getElementById('node-type-tag').innerHTML =
     '<span class="tag" style="background:#7F8C8D">省略节点</span>';
 }}
