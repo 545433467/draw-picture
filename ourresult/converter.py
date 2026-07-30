@@ -42,6 +42,7 @@ SERVICE_STYLE = {
     "oss":          ("#8E44AD", "#5B2C6F", "roundrectangle"),
     "obs":          ("#8E44AD", "#5B2C6F", "roundrectangle"),
     "sfs":          ("#9B59B6", "#6C3483", "roundrectangle"),
+    "sfs3":         ("#9B59B6", "#6C3483", "roundrectangle"),
     "evs":          ("#A569BD", "#7D3C98", "roundrectangle"),
     "cbr":          ("#7FB3D3", "#2C7BB6", "roundrectangle"),
     # 数据库
@@ -58,6 +59,8 @@ SERVICE_STYLE = {
     "kafka":        ("#F39C12", "#9A6007", "roundrectangle"),
     "mq":           ("#F39C12", "#9A6007", "roundrectangle"),
     "dms":          ("#F39C12", "#9A6007", "roundrectangle"),
+    "zookeeper":    ("#F39C12", "#9A6007", "roundrectangle"),
+    "rabbitmq":     ("#F39C12", "#9A6007", "roundrectangle"),
     "smn":          ("#D35400", "#7E5109", "roundrectangle"),
     # 应用 / API
     "apigateway":   ("#1ABC9C", "#0E8A72", "roundrectangle"),
@@ -88,11 +91,12 @@ SERVICE_DISPLAY_NAMES = {
     "vpc": "VPC", "eip": "EIP", "elb": "ELB", "slb": "SLB",
     "nat": "NAT", "vpn": "VPN", "cdn": "CDN", "waf": "WAF",
     "er": "ER", "dli": "DLI",
-    "oss": "OSS", "obs": "OBS", "sfs": "SFS", "evs": "EVS", "cbr": "CBR",
+    "oss": "OSS", "obs": "OBS", "sfs": "SFS", "sfs3": "SFS3", "evs": "EVS", "cbr": "CBR",
     "rds": "RDS", "dcs": "DCS", "redis": "Redis", "dds": "DDS",
     "mongodb": "MongoDB", "gaussdb": "GaussDB", "dws": "DWS",
     "css": "CSS", "elasticsearch": "Elasticsearch",
-    "kafka": "Kafka", "mq": "MQ", "dms": "DMS", "smn": "SMN",
+    "kafka": "Kafka", "mq": "MQ", "dms": "DMS",
+    "zookeeper": "ZooKeeper", "rabbitmq": "RabbitMQ", "smn": "SMN",
     "apigateway": "API Gateway", "apig": "APIG",
     "swr": "SWR", "ecr": "ECR",
     "iam": "IAM", "kms": "KMS",
@@ -106,6 +110,10 @@ NAME_PATTERNS = [
     ("nginx",      "nginx"),
     ("tomcat",     "tomcat"),
     ("redis",      "redis"),
+    ("zookeeper",  "zookeeper"),
+    ("zoo-keeper", "zookeeper"),
+    ("rabbitmq",   "rabbitmq"),
+    ("rabbit-mq",  "rabbitmq"),
     ("kafka",      "kafka"),
     ("mysql",      "mysql"),
     ("mongodb",    "mongodb"),
@@ -117,6 +125,7 @@ NAME_PATTERNS = [
     ("obs",        "obs"),
     ("oss",        "oss"),
     ("sfs",        "sfs"),
+    ("sfs3",       "sfs3"),
     ("evs",        "evs"),
     ("cbr",        "cbr"),
     ("elb",        "elb"),
@@ -142,11 +151,29 @@ NAME_PATTERNS = [
 
 def get_service_key(name, type_field):
     """从 type 字段或节点名称中提取规范化服务类型键。"""
-    if type_field and type_field != "default":
-        # 统一 kubernetes → k8s
-        if type_field == "kubernetes":
+    type_text = str(type_field or "").lower().strip()
+    if type_text and type_text != "default":
+        # ECS/BMS-hosted middleware should be grouped as middleware, not app compute.
+        if type_text in {"ecs", "bms"}:
+            name_lower = (name or "").lower()
+            for pattern, key in (
+                    ("zookeeper", "zookeeper"), ("zoo-keeper", "zookeeper"),
+                    ("rabbitmq", "rabbitmq"), ("rabbit-mq", "rabbitmq"),
+                    ("rabbit_mq", "rabbitmq")):
+                if pattern in name_lower:
+                    return key
+        normalized_type = re.split(r"[-_./:\s]+", type_text, maxsplit=1)[0]
+        if normalized_type == "kubernetes":
             return "k8s"
-        return type_field
+        if normalized_type in SERVICE_DISPLAY_NAMES and normalized_type != "default":
+            return normalized_type
+        for pattern, key in NAME_PATTERNS:
+            if pattern in type_text:
+                return "k8s" if key == "kubernetes" else key
+        # 统一 kubernetes → k8s
+        if type_text == "kubernetes":
+            return "k8s"
+        return type_text
     name_lower = (name or "").lower()
     for pattern, key in NAME_PATTERNS:
         if pattern in name_lower:
@@ -178,8 +205,57 @@ def make_node_display_label(name, service_key):
     return f"{service_name}\n{compact_resource_name(name)}"
 
 
+TOPOLOGY_LAYERS = [
+    ("access", "第一层：接入层"),
+    ("network_lb", "第二层：网络与负载均衡层"),
+    ("compute_app", "第三层：计算、容器与应用服务层"),
+    ("data_middleware_storage", "第四层：中间件、数据与存储层"),
+]
+TOPOLOGY_LAYER_ORDER = {key: index for index, (key, _) in enumerate(TOPOLOGY_LAYERS)}
+TOPOLOGY_LAYER_NAMES = dict(TOPOLOGY_LAYERS)
+
+ACCESS_LAYER_TYPES = {"cdn", "waf", "eip"}
+NETWORK_LB_LAYER_TYPES = {"elb", "slb", "vpc", "nat", "vpn", "er"}
+COMPUTE_APP_LAYER_TYPES = {
+    "ecs", "bms", "cce", "cci", "k8s", "kubernetes", "functiongraph",
+    "apigateway", "apig", "nginx", "tomcat", "maas", "swr", "ecr",
+}
+DATA_MIDDLEWARE_STORAGE_LAYER_TYPES = {
+    "dcs", "redis", "rds", "dds", "mongodb", "gaussdb", "dws", "css",
+    "elasticsearch", "oss", "obs", "sfs", "sfs3", "evs", "cbr", "kafka", "mq",
+    "dms", "smn", "mysql", "zookeeper", "rabbitmq",
+}
+MIDDLEWARE_NAME_RE = re.compile(
+    r"(^|[^a-z0-9])(zookeeper|zoo-keeper|zk|rabbitmq|rabbit-mq|rabbit_mq|rabbit)"
+    r"([^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+
+
+def get_topology_layer(service_key, name="", type_field=""):
+    """Return the fixed business-internal layer key for a resource."""
+    service = str(service_key or "default").casefold()
+    text = f"{name or ''} {type_field or ''} {service}".casefold()
+
+    if service in DATA_MIDDLEWARE_STORAGE_LAYER_TYPES or MIDDLEWARE_NAME_RE.search(text):
+        return "data_middleware_storage"
+    if service in ACCESS_LAYER_TYPES:
+        return "access"
+    if service in NETWORK_LB_LAYER_TYPES:
+        return "network_lb"
+    if service in COMPUTE_APP_LAYER_TYPES:
+        return "compute_app"
+    return "compute_app"
+
+
+def get_topology_layer_name(layer_key):
+    return TOPOLOGY_LAYER_NAMES.get(layer_key, TOPOLOGY_LAYER_NAMES["compute_app"])
+
+
 # 这些类型作为 compound 容器节点（自动生成，不直接来自行数据）
-_VIRTUAL_CONTAINER_TYPES = {"__region__", "__group__", "__business__"}
+_VIRTUAL_CONTAINER_TYPES = {
+    "__region__", "__group__", "__business__", "__layer__", "__service__",
+}
 
 # 同一业务、同一服务类型最多渲染的真实资源数。其余资源合并为一个摘要节点。
 MAX_VISIBLE_SERVICE_NODES = 5
@@ -337,8 +413,6 @@ def read_excel(filepath):
         name = get("服务名称")
         if not name or is_filtered_node(name):
             continue
-        if "是否核心业务" in col_map and get("是否核心业务") != "是":
-            continue
 
         records.append({
             "name":            name,
@@ -386,6 +460,7 @@ def build_graph(records):
         grp = (r["group"]    or "").strip()
         source_biz = (r["business"] or "").strip()
         svc_key = forced_service_key or get_service_key(r["name"], stype)
+        layer_key = get_topology_layer(svc_key, r["name"], stype)
         bg, border, shape = SERVICE_STYLE.get(
             svc_key, SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
         )
@@ -396,7 +471,7 @@ def build_graph(records):
         else:
             biz_key = f"__service_business__:{svc_key}"
         biz_label = source_biz or get_service_display_name(svc_key)
-        group_key = (biz_key, svc_key)
+        group_key = (biz_key, layer_key, svc_key)
 
         data = {
             "id":            nid,
@@ -404,6 +479,8 @@ def build_graph(records):
             "display_label": make_node_display_label(r["name"], svc_key),
             "type":          stype,
             "service_key":   svc_key,
+            "layer_key":     layer_key,
+            "layer_name":    get_topology_layer_name(layer_key),
             "spec":          r["spec"],
             "desc":          r["desc"],
             "resource_id":   r["resource_id"],
@@ -724,7 +801,7 @@ def build_graph(records):
         hidden_count = len(info["hidden"])
         if not hidden_count:
             continue
-        biz_key, svc_key = group_key
+        biz_key, layer_key, svc_key = group_key
         sample_data = info["entries"][0]["data"]
         summary_id = f"summary_{info['group_index']}"
         info["summary_id"] = summary_id
@@ -735,6 +812,8 @@ def build_graph(records):
             "type":            "__summary__",
             "service_key":     svc_key,
             "service_name":    get_service_display_name(svc_key),
+            "layer_key":       layer_key,
+            "layer_name":      get_topology_layer_name(layer_key),
             "business":        sample_data["business"],
             "business_key":    biz_key,
             "is_virtual_business": sample_data["is_virtual_business"],
@@ -794,12 +873,43 @@ def build_graph(records):
             "text_color":   text,
             "shape":        "roundrectangle",
         }})
-    # ── 2.6 在业务容器内按服务类型创建子容器 ──────────────────────────────
+    # ── 2.6 在业务容器内按固定架构层和服务类型创建子容器 ─────────────────
+    layer_containers = []
     service_containers = []
     node_by_id = {node["data"]["id"]: node for node in nodes}
-    for (biz_key, svc_key), info in service_groups.items():
+    layers_by_business = defaultdict(set)
+    layer_totals = defaultdict(int)
+    for (biz_key, layer_key, svc_key), info in service_groups.items():
+        if business_meta[biz_key]["is_virtual"]:
+            continue
+        layers_by_business[biz_key].add(layer_key)
+        layer_totals[(biz_key, layer_key)] += len(info)
+
+    layer_map = {}
+    for biz_key, layer_keys in layers_by_business.items():
         biz_id = business_map[biz_key]
-        group_meta = group_info[(biz_key, svc_key)]
+        for layer_key in sorted(
+                layer_keys,
+                key=lambda key: TOPOLOGY_LAYER_ORDER.get(key, 999)):
+            layer_id = f"layer_{biz_id}_{safe_id(layer_key)}"
+            layer_map[(biz_key, layer_key)] = layer_id
+            layer_containers.append({"group": "nodes", "data": {
+                "id":              layer_id,
+                "name":            get_topology_layer_name(layer_key),
+                "type":            "__layer__",
+                "layer_key":       layer_key,
+                "layer_name":      get_topology_layer_name(layer_key),
+                "resource_total":  layer_totals[(biz_key, layer_key)],
+                "is_container":    1,
+                "parent":          biz_id,
+                "bg_color":        "#F7F9FC",
+                "border_color":    "#5D6D7E",
+                "shape":           "roundrectangle",
+            }})
+
+    for (biz_key, layer_key, svc_key), info in service_groups.items():
+        biz_id = business_map[biz_key]
+        group_meta = group_info[(biz_key, layer_key, svc_key)]
         rendered_ids = {entry["data"]["id"] for entry in group_meta["visible"]}
         if group_meta["summary_id"]:
             rendered_ids.add(group_meta["summary_id"])
@@ -808,17 +918,20 @@ def build_graph(records):
         if business_meta[biz_key]["is_virtual"]:
             continue
 
-        sc_id = f"sc_{biz_id}_{safe_id(svc_key)}"
+        layer_id = layer_map[(biz_key, layer_key)]
+        sc_id = f"sc_{biz_id}_{safe_id(layer_key)}_{safe_id(svc_key)}"
         service_containers.append({"group": "nodes", "data": {
             "id":              sc_id,
             "name":            get_service_display_name(svc_key),
             "type":            "__service__",
             "service_key":     svc_key,
+            "layer_key":       layer_key,
+            "layer_name":      get_topology_layer_name(layer_key),
             "resource_total":  len(info),
             "visible_count":   len(group_meta["visible"]),
             "collapsed_count": len(group_meta["hidden"]),
             "is_container":    1,
-            "parent":          biz_id,
+            "parent":          layer_id,
             "bg_color":        "#F2F3F4",
             "border_color":    "#7F8C8D",
             "shape":           "roundrectangle",
@@ -828,8 +941,9 @@ def build_graph(records):
             if node:
                 node["data"]["parent"] = sc_id
                 node["data"]["service_container"] = sc_id
+                node["data"]["layer_container"] = layer_id
 
-    nodes = biz_containers + service_containers + nodes
+    nodes = biz_containers + layer_containers + service_containers + nodes
 
     # ── 3. 创建边 ─────────────────────────────────────────────────────────
 
@@ -962,6 +1076,7 @@ def compute_bdat_positions(elements):
     NODE_W        = 195
     ROW_H         = 105
     SERVICE_GAP   = 90
+    LAYER_GAP     = 145
     MAX_ROW_NODES = MAX_VISIBLE_SERVICE_NODES
     GROUP_PAD     = 110
     GAP_X         = 450
@@ -996,42 +1111,71 @@ def compute_bdat_positions(elements):
         service_first_index = {}
         for index, nid in enumerate(biz_groups[biz_key]):
             service_key = leaf_nodes[nid].get("service_key", "default")
-            services[service_key].append(nid)
-            service_first_index.setdefault(service_key, index)
+            layer_key = leaf_nodes[nid].get("layer_key") or get_topology_layer(
+                service_key, leaf_nodes[nid].get("name", ""),
+                leaf_nodes[nid].get("type", "")
+            )
+            slot_key = (layer_key, service_key)
+            services[slot_key].append(nid)
+            service_first_index.setdefault(slot_key, index)
 
-        # 将节点级依赖提升为服务级依赖，用于排列完整服务块。
-        in_deg = {service_key: 0 for service_key in services}
+        # 将节点级依赖提升为同层服务级依赖，用于排列完整服务块。
+        in_deg = {slot_key: 0 for slot_key in services}
         adjacency = defaultdict(set)
         for src, tgt in edges_list:
             if src not in nodes_in_group or tgt not in nodes_in_group:
                 continue
             src_service = leaf_nodes[src].get("service_key", "default")
             tgt_service = leaf_nodes[tgt].get("service_key", "default")
-            if src_service == tgt_service or tgt_service in adjacency[src_service]:
+            src_layer = leaf_nodes[src].get("layer_key") or get_topology_layer(
+                src_service, leaf_nodes[src].get("name", ""),
+                leaf_nodes[src].get("type", "")
+            )
+            tgt_layer = leaf_nodes[tgt].get("layer_key") or get_topology_layer(
+                tgt_service, leaf_nodes[tgt].get("name", ""),
+                leaf_nodes[tgt].get("type", "")
+            )
+            src_slot = (src_layer, src_service)
+            tgt_slot = (tgt_layer, tgt_service)
+            if src_slot == tgt_slot or src_layer != tgt_layer:
                 continue
-            adjacency[src_service].add(tgt_service)
-            in_deg[tgt_service] += 1
+            if tgt_slot in adjacency[src_slot]:
+                continue
+            adjacency[src_slot].add(tgt_slot)
+            in_deg[tgt_slot] += 1
 
-        ready = sorted(
-            (key for key, degree in in_deg.items() if degree == 0),
-            key=lambda key: service_first_index[key],
-        )
         service_order = []
-        while ready:
-            service_key = ready.pop(0)
-            service_order.append(service_key)
-            for target_key in sorted(adjacency[service_key],
-                                     key=lambda key: service_first_index[key]):
-                in_deg[target_key] -= 1
-                if in_deg[target_key] == 0:
-                    ready.append(target_key)
-                    ready.sort(key=lambda key: service_first_index[key])
-
-        # 服务间存在环路时，剩余服务按首次出现顺序连续排在末尾。
-        service_order.extend(sorted(
-            (key for key in services if key not in service_order),
-            key=lambda key: service_first_index[key],
+        ordered_layer_keys = [
+            key for key, _ in TOPOLOGY_LAYERS
+            if any(slot[0] == key for slot in services)
+        ]
+        ordered_layer_keys.extend(sorted(
+            {slot[0] for slot in services if slot[0] not in TOPOLOGY_LAYER_ORDER},
+            key=lambda key: min(service_first_index[slot]
+                                for slot in services if slot[0] == key),
         ))
+        for layer_key in ordered_layer_keys:
+            layer_slots = [slot for slot in services if slot[0] == layer_key]
+            ready = sorted(
+                (slot for slot in layer_slots if in_deg[slot] == 0),
+                key=lambda slot: service_first_index[slot],
+            )
+            while ready:
+                slot_key = ready.pop(0)
+                service_order.append(slot_key)
+                for target_key in sorted(
+                        adjacency[slot_key],
+                        key=lambda slot: service_first_index[slot]):
+                    in_deg[target_key] -= 1
+                    if in_deg[target_key] == 0:
+                        ready.append(target_key)
+                        ready.sort(key=lambda slot: service_first_index[slot])
+
+            # 服务间存在环路时，剩余服务按首次出现顺序连续排在末尾。
+            service_order.extend(sorted(
+                (slot for slot in layer_slots if slot not in service_order),
+                key=lambda slot: service_first_index[slot],
+            ))
 
         max_row_cap = max(min(len(node_ids), MAX_ROW_NODES)
                           for node_ids in services.values())
@@ -1039,13 +1183,16 @@ def compute_bdat_positions(elements):
 
         y_acc = 0
         offsets = {}
-        for index, service_key in enumerate(service_order):
-            offsets[service_key] = y_acc
-            row_count = ((len(services[service_key]) + MAX_ROW_NODES - 1)
+        prev_layer_key = None
+        for index, slot_key in enumerate(service_order):
+            layer_key, _ = slot_key
+            if index > 0:
+                y_acc += LAYER_GAP if layer_key != prev_layer_key else SERVICE_GAP
+            offsets[slot_key] = y_acc
+            row_count = ((len(services[slot_key]) + MAX_ROW_NODES - 1)
                          // MAX_ROW_NODES)
             y_acc += row_count * ROW_H
-            if index < len(service_order) - 1:
-                y_acc += SERVICE_GAP
+            prev_layer_key = layer_key
         group_h = y_acc + 2 * GROUP_PAD
 
         group_services[biz_key] = services
@@ -1086,9 +1233,9 @@ def compute_bdat_positions(elements):
         base_y     = row_y[r] + GROUP_PAD
         content_w  = group_sizes[biz_key][0] - 2 * GROUP_PAD
 
-        for service_key in service_orders[biz_key]:
-            service_nodes = group_services[biz_key][service_key]
-            service_y = base_y + service_offsets[biz_key][service_key]
+        for slot_key in service_orders[biz_key]:
+            service_nodes = group_services[biz_key][slot_key]
+            service_y = base_y + service_offsets[biz_key][slot_key]
             row_count = ((len(service_nodes) + MAX_ROW_NODES - 1)
                          // MAX_ROW_NODES)
             for row_index in range(row_count):
@@ -1201,6 +1348,25 @@ def _make_cytoscape_style():
                 "background-color": "#FDFEFE",
                 "background-opacity": 0.08,
                 "font-size": 12,
+            }
+        },
+        {
+            "selector": "node[type = '__layer__']",
+            "style": {
+                "border-color": "#5D6D7E",
+                "border-width": 2,
+                "border-style": "dashed",
+                "background-color": "#F7F9FC",
+                "background-opacity": 0.34,
+                "font-size": 12,
+                "font-weight": "bold",
+                "color": "#34495E",
+                "text-valign": "top",
+                "text-background-color": "#fff",
+                "text-background-opacity": 0.92,
+                "text-background-padding": "3px",
+                "padding": "34px",
+                "shape": "roundrectangle",
             }
         },
         # 确认边
@@ -1552,7 +1718,7 @@ setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
 cy.on('tap', 'node', function(evt) {{
   var d  = evt.target.data();
   var bg = d.bg_color || '#888';
-  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__service__') {{
+  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__') {{
     showContainerDetail(d);
   }} else if (d.is_summary === 1) {{
     showSummaryDetail(d);
@@ -1606,6 +1772,7 @@ function showNodeDetail(d, bg) {{
   var rows = [
     ['资源名称', d.name],
     ['所属业务', d.business  || '-'],
+    ['所属层',   d.layer_name || '-'],
     ['资源类型', (d.type||'').toUpperCase()],
     ['资源ID',   d.resource_id  || '-'],
     ['企业项目', d.enterprise_id|| '-'],
@@ -1629,7 +1796,8 @@ function showNodeDetail(d, bg) {{
   var src   = cy.getElementById(d.id);
   var nbrs  = src.neighborhood().nodes().filter(function(n) {{
     var t = n.data('type');
-    return t !== '__region__' && t !== '__group__' && t !== '__business__';
+    return t !== '__region__' && t !== '__group__' && t !== '__business__' &&
+           t !== '__layer__' && t !== '__service__';
   }});
   if (nbrs.length > 0) {{
     html += '<div class="d-row"><div class="d-label">相邻节点</div><div class="d-value">';
@@ -1649,6 +1817,7 @@ function showNodeDetail(d, bg) {{
 function showSummaryDetail(d) {{
   var rows = [
     ['服务类型', d.service_name || d.service_key || '-'],
+    ['所属层', d.layer_name || '-'],
     ['所属业务', d.business || '-'],
     ['省略节点', d.collapsed_count || 0],
     ['资源总数', d.resource_total || 0],
@@ -1664,9 +1833,11 @@ function showSummaryDetail(d) {{
 function showContainerDetail(d) {{
   var label = d.type === '__region__' ? '区域'
             : d.type === '__business__' ? '所属业务'
+            : d.type === '__layer__' ? '业务层'
             : d.type === '__service__' ? '服务类型'
             : '资源分组';
   var tagColor = d.type === '__business__' ? '#1ABC9C'
+               : d.type === '__layer__' ? '#5D6D7E'
                : d.type === '__service__'  ? '#7F8C8D'
                : '#2E86C1';
   var html = '<div class="d-row"><div class="d-label">'+label+'</div>' +
@@ -1732,6 +1903,7 @@ function searchNodes(q) {{
         || (d.type||'').toLowerCase().includes(q)
         || (d.resource_id||'').toLowerCase().includes(q)
         || (d.group_label||'').toLowerCase().includes(q)
+        || (d.layer_name||'').toLowerCase().includes(q)
         || (d.business||'').toLowerCase().includes(q);
   }});
   matched.removeClass('faded').addClass('highlighted');
@@ -1754,28 +1926,18 @@ function toggleBusinessView() {{
     // 先摘除叶节点与服务子容器的父子关系
     cy.nodes().forEach(function(n) {{
       var p = n.data('parent');
-      if (p && (p.indexOf('biz_') === 0 || p.indexOf('sc_') === 0)) {{
+      if (p && (p.indexOf('biz_') === 0 || p.indexOf('layer_') === 0 || p.indexOf('sc_') === 0)) {{
         _origParents[n.id()] = p;
         n.move({{ parent: null }});
       }}
     }});
-    cy.nodes('[type = "__business__"],[type = "__service__"]').style('display', 'none');
+    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"]').style('display', 'none');
     btn.innerHTML = '&#127968; 业务分组:关';
     btn.style.background = 'rgba(255,255,255,.15)';
   }} else {{
-    cy.nodes('[type = "__business__"],[type = "__service__"]').style('display', 'element');
-    // 先恢复业务容器直属子节点（含服务子容器），再恢复叶节点到服务子容器
-    var bizChildren = {{}}, scChildren = {{}};
+    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"]').style('display', 'element');
     Object.keys(_origParents).forEach(function(nid) {{
-      var p = _origParents[nid];
-      if (p.indexOf('biz_') === 0) bizChildren[nid] = p;
-      else scChildren[nid] = p;
-    }});
-    Object.keys(bizChildren).forEach(function(nid) {{
-      cy.getElementById(nid).move({{ parent: bizChildren[nid] }});
-    }});
-    Object.keys(scChildren).forEach(function(nid) {{
-      cy.getElementById(nid).move({{ parent: scChildren[nid] }});
+      cy.getElementById(nid).move({{ parent: _origParents[nid] }});
     }});
     _origParents = {{}};
     btn.innerHTML = '&#127968; 业务分组:开';

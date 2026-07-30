@@ -413,7 +413,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         rds_y = [positions[node["id"]]["y"] for node in rds_nodes]
         self.assertTrue(max(ecs_y) < min(rds_y) or max(rds_y) < min(ecs_y))
 
-    def test_read_excel_filters_non_core_rows_when_core_column_exists(self):
+    def test_read_excel_keeps_rows_even_when_core_column_exists(self):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.append(["服务名称", "服务类型", "所属业务", "是否核心业务"])
@@ -426,8 +426,20 @@ class BuildGraphAggregationTests(unittest.TestCase):
             wb.save(path)
             records = read_excel(path)
 
-        self.assertEqual([record["name"] for record in records], ["core-ecs"])
-        self.assertEqual(records[0]["is_core_business"], "是")
+        self.assertEqual([record["name"] for record in records],
+                         ["core-ecs", "non-core-rds", "blank-core-cce"])
+        self.assertEqual([record["is_core_business"] for record in records],
+                         ["是", "", ""])
+
+    def test_cce_deployment_and_sfs3_map_to_expected_layers(self):
+        self.assertEqual(
+            get_topology_layer("cce", "cce_Deployment-01", "cce_Deployment"),
+            "compute_app",
+        )
+        self.assertEqual(
+            get_topology_layer("sfs3", "sfs3-share", "sfs3"),
+            "data_middleware_storage",
+        )
 
     def test_bdat_business_grid_uses_four_columns(self):
         records = [
