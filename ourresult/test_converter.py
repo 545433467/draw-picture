@@ -9,6 +9,7 @@ from converter import (
     _make_cytoscape_style,
     build_graph,
     compute_bdat_positions,
+    get_topology_layer,
     read_excel,
 )
 
@@ -412,6 +413,29 @@ class BuildGraphAggregationTests(unittest.TestCase):
         ecs_y = [positions[node["id"]]["y"] for node in ecs_nodes]
         rds_y = [positions[node["id"]]["y"] for node in rds_nodes]
         self.assertTrue(max(ecs_y) < min(rds_y) or max(rds_y) < min(ecs_y))
+
+    def test_services_in_same_layer_are_laid_out_horizontally(self):
+        records = [
+            make_record("ecs-rabbitmq-1", service_type="ecs"),
+            make_record("rds-main", service_type="rds"),
+            make_record("dcs-main", service_type="dcs"),
+            make_record("obs-bucket", service_type="obs"),
+        ]
+
+        elements = build_graph(records)
+        nodes = {
+            node["name"]: node for node in element_data(elements, "nodes")
+            if not node.get("is_container")
+        }
+        positions = compute_bdat_positions(elements)
+        names = ["ecs-rabbitmq-1", "rds-main", "dcs-main", "obs-bucket"]
+
+        self.assertTrue(all(nodes[name]["layer_key"] == "data_middleware_storage"
+                            for name in names))
+        self.assertEqual(len({positions[nodes[name]["id"]]["y"]
+                              for name in names}), 1)
+        self.assertEqual(len({positions[nodes[name]["id"]]["x"]
+                              for name in names}), 4)
 
     def test_read_excel_keeps_rows_even_when_core_column_exists(self):
         wb = openpyxl.Workbook()

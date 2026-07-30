@@ -1144,7 +1144,7 @@ def compute_bdat_positions(elements):
             adjacency[src_slot].add(tgt_slot)
             in_deg[tgt_slot] += 1
 
-        service_order = []
+        layer_service_orders = {}
         ordered_layer_keys = [
             key for key, _ in TOPOLOGY_LAYERS
             if any(slot[0] == key for slot in services)
@@ -1156,13 +1156,14 @@ def compute_bdat_positions(elements):
         ))
         for layer_key in ordered_layer_keys:
             layer_slots = [slot for slot in services if slot[0] == layer_key]
+            ordered_slots = []
             ready = sorted(
                 (slot for slot in layer_slots if in_deg[slot] == 0),
                 key=lambda slot: service_first_index[slot],
             )
             while ready:
                 slot_key = ready.pop(0)
-                service_order.append(slot_key)
+                ordered_slots.append(slot_key)
                 for target_key in sorted(
                         adjacency[slot_key],
                         key=lambda slot: service_first_index[slot]):
@@ -1171,34 +1172,53 @@ def compute_bdat_positions(elements):
                         ready.append(target_key)
                         ready.sort(key=lambda slot: service_first_index[slot])
 
-            # 服务间存在环路时，剩余服务按首次出现顺序连续排在末尾。
-            service_order.extend(sorted(
-                (slot for slot in layer_slots if slot not in service_order),
+            # Keep cyclic services in first-seen order at the end of the layer.
+            ordered_slots.extend(sorted(
+                (slot for slot in layer_slots if slot not in ordered_slots),
                 key=lambda slot: service_first_index[slot],
             ))
+            layer_service_orders[layer_key] = ordered_slots
 
-        max_row_cap = max(min(len(node_ids), MAX_ROW_NODES)
-                          for node_ids in services.values())
-        group_w = max_row_cap * NODE_W + 2 * GROUP_PAD
+        service_blocks = {}
+        layer_sizes = {}
+        max_layer_w = NODE_W
+        for layer_key, ordered_slots in layer_service_orders.items():
+            layer_w = 0
+            layer_h = 0
+            for index, slot_key in enumerate(ordered_slots):
+                row_count = ((len(services[slot_key]) + MAX_ROW_NODES - 1)
+                             // MAX_ROW_NODES)
+                block_w = min(len(services[slot_key]), MAX_ROW_NODES) * NODE_W
+                block_h = row_count * ROW_H
+                service_blocks[slot_key] = {
+                    "w": block_w,
+                    "h": block_h,
+                    "row_count": row_count,
+                }
+                layer_w += block_w
+                if index < len(ordered_slots) - 1:
+                    layer_w += SERVICE_GAP
+                layer_h = max(layer_h, block_h)
+            layer_sizes[layer_key] = (layer_w, layer_h)
+            max_layer_w = max(max_layer_w, layer_w)
 
         y_acc = 0
-        offsets = {}
-        prev_layer_key = None
-        for index, slot_key in enumerate(service_order):
-            layer_key, _ = slot_key
+        layer_offsets = {}
+        for index, layer_key in enumerate(layer_service_orders.keys()):
             if index > 0:
-                y_acc += LAYER_GAP if layer_key != prev_layer_key else SERVICE_GAP
-            offsets[slot_key] = y_acc
-            row_count = ((len(services[slot_key]) + MAX_ROW_NODES - 1)
-                         // MAX_ROW_NODES)
-            y_acc += row_count * ROW_H
-            prev_layer_key = layer_key
+                y_acc += LAYER_GAP
+            layer_offsets[layer_key] = y_acc
+            y_acc += layer_sizes[layer_key][1]
         group_h = y_acc + 2 * GROUP_PAD
 
         group_services[biz_key] = services
-        service_orders[biz_key] = service_order
-        service_offsets[biz_key] = offsets
-        group_sizes[biz_key] = (group_w, group_h)
+        service_orders[biz_key] = layer_service_orders
+        service_offsets[biz_key] = {
+            "layers": layer_offsets,
+            "blocks": service_blocks,
+            "layer_sizes": layer_sizes,
+        }
+        group_sizes[biz_key] = (max_layer_w + 2 * GROUP_PAD, group_h)
 
     # 计算网格各列最大宽度、各行最大高度
     col_w = defaultdict(int)
@@ -1233,23 +1253,29 @@ def compute_bdat_positions(elements):
         base_y     = row_y[r] + GROUP_PAD
         content_w  = group_sizes[biz_key][0] - 2 * GROUP_PAD
 
-        for slot_key in service_orders[biz_key]:
-            service_nodes = group_services[biz_key][slot_key]
-            service_y = base_y + service_offsets[biz_key][slot_key]
-            row_count = ((len(service_nodes) + MAX_ROW_NODES - 1)
-                         // MAX_ROW_NODES)
-            for row_index in range(row_count):
-                row_nodes = service_nodes[
-                    row_index * MAX_ROW_NODES:(row_index + 1) * MAX_ROW_NODES
-                ]
-                span = (len(row_nodes) - 1) * NODE_W
-                start_x = base_x + (content_w - span) / 2
-                y_pos = service_y + row_index * ROW_H
-                for column_index, node_id in enumerate(row_nodes):
-                    positions[node_id] = {
-                        "x": round(start_x + column_index * NODE_W, 1),
-                        "y": round(y_pos, 1),
-                    }
+        offset_info = service_offsets[biz_key]
+        for layer_key, ordered_slots in service_orders[biz_key].items():
+            layer_y = base_y + offset_info["layers"][layer_key]
+            layer_w, layer_h = offset_info["layer_sizes"][layer_key]
+            service_x = base_x + (content_w - layer_w) / 2
+            for slot_key in ordered_slots:
+                service_nodes = group_services[biz_key][slot_key]
+                block = offset_info["blocks"][slot_key]
+                service_y = layer_y + (layer_h - block["h"]) / 2
+                row_count = block["row_count"]
+                for row_index in range(row_count):
+                    row_nodes = service_nodes[
+                        row_index * MAX_ROW_NODES:(row_index + 1) * MAX_ROW_NODES
+                    ]
+                    span = (len(row_nodes) - 1) * NODE_W
+                    start_x = service_x + (block["w"] - span) / 2
+                    y_pos = service_y + row_index * ROW_H
+                    for column_index, node_id in enumerate(row_nodes):
+                        positions[node_id] = {
+                            "x": round(start_x + column_index * NODE_W, 1),
+                            "y": round(y_pos, 1),
+                        }
+                service_x += block["w"] + SERVICE_GAP
 
     return positions
 
