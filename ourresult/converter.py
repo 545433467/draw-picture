@@ -131,13 +131,43 @@ SERVICE_ICON_FILES = {
     "rabbitmq": "MQ.png",
     "obs": "OBS.png",
     "oss": "OBS.png",
+    "rds": "RDS.png",
     "sfs": "SFS.png",
     "sfs3": "SFS.png",
+    "vpc": "VPC.png",
     "waf": "WAF.png",
     "zookeeper": "ZooKeeper.png",
 }
 
+SERVICE_ICON_ALIASES = {
+    "cce": ("cce_deployment", "cce deploym", "cce deploy", "cce deployment"),
+    "cce_deployment": ("cce", "cce_deploym", "cce deployment"),
+    "cce_deploym": ("cce", "cce_deployment", "cce deployment"),
+    "dcs": ("redis",),
+    "redis": ("dcs",),
+    "elb": ("slb",),
+    "slb": ("elb",),
+    "mq": ("dms", "kafka", "rabbitmq"),
+    "dms": ("mq",),
+    "kafka": ("mq",),
+    "rabbitmq": ("mq",),
+    "obs": ("oss",),
+    "oss": ("obs",),
+    "sfs": ("sfs3",),
+    "sfs3": ("sfs",),
+}
+
 _ICON_DATA_URI_CACHE = None
+
+
+def _normalize_icon_key(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _read_png_data_uri(path):
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def _load_service_icon_data_uris():
@@ -146,21 +176,62 @@ def _load_service_icon_data_uris():
         return _ICON_DATA_URI_CACHE
 
     icons = {}
+    normalized_icons = {}
+
+    def remember_icon(key, data_uri):
+        key = str(key or "").casefold()
+        if not key:
+            return
+        icons.setdefault(key, data_uri)
+        icons.setdefault(_normalize_icon_key(key), data_uri)
+        normalized_icons.setdefault(_normalize_icon_key(key), data_uri)
+
     for service_key, filename in SERVICE_ICON_FILES.items():
         path = os.path.join(ICON_DIR, filename)
         try:
-            with open(path, "rb") as f:
-                encoded = base64.b64encode(f.read()).decode("ascii")
+            data_uri = _read_png_data_uri(path)
         except FileNotFoundError:
             continue
-        icons[service_key] = f"data:image/png;base64,{encoded}"
+        remember_icon(service_key, data_uri)
+        remember_icon(os.path.splitext(filename)[0], data_uri)
+
+    try:
+        filenames = os.listdir(ICON_DIR)
+    except FileNotFoundError:
+        filenames = []
+
+    for filename in filenames:
+        if not filename.casefold().endswith(".png"):
+            continue
+        path = os.path.join(ICON_DIR, filename)
+        if not os.path.isfile(path):
+            continue
+        data_uri = _read_png_data_uri(path)
+        remember_icon(os.path.splitext(filename)[0], data_uri)
+
+    for service_key, display_name in SERVICE_DISPLAY_NAMES.items():
+        candidates = [
+            service_key,
+            display_name,
+            os.path.splitext(SERVICE_ICON_FILES.get(service_key, ""))[0],
+            *SERVICE_ICON_ALIASES.get(service_key, ()),
+        ]
+        for candidate in candidates:
+            data_uri = (icons.get(str(candidate or "").casefold())
+                        or normalized_icons.get(_normalize_icon_key(candidate)))
+            if data_uri:
+                remember_icon(service_key, data_uri)
+                break
 
     _ICON_DATA_URI_CACHE = icons
     return icons
 
 
 def get_service_icon_data_uri(service_key):
-    return _load_service_icon_data_uris().get(str(service_key or "").casefold(), "")
+    icons = _load_service_icon_data_uris()
+    return (icons.get(str(service_key or "").casefold())
+            or icons.get(_normalize_icon_key(service_key))
+            or "")
 
 
 # 从节点名称中识别服务类型的关键词（顺序从精确到宽泛）
@@ -1701,8 +1772,9 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
                 e["data"]["bdat_x"] = bdat_pos[nid]["x"]
                 e["data"]["bdat_y"] = bdat_pos[nid]["y"]
 
-    # ensure_ascii=True：将中文转为 \uXXXX 转义，避免内联 JS 中出现非 ASCII 字符导致的解析问题
-    icon_data_uris = _load_service_icon_data_uris()
+    # Mark real resources that have matching PNG icons.
+    _load_service_icon_data_uris()
+    icon_data_uris = {}
     for e in elements:
         if e.get("group") != "nodes":
             continue
@@ -1710,8 +1782,13 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
         if data.get("is_container") or data.get("is_summary"):
             data["has_icon"] = 0
             continue
-        data["has_icon"] = 1 if data.get("service_key") in icon_data_uris else 0
+        service_key = str(data.get("service_key") or "").casefold()
+        icon_data_uri = get_service_icon_data_uri(service_key)
+        if icon_data_uri and service_key:
+            icon_data_uris[service_key] = icon_data_uri
+        data["has_icon"] = 1 if icon_data_uri else 0
 
+    # ensure_ascii=True：将中文转为 \uXXXX 转义，避免内联 JS 中出现非 ASCII 字符导致的解析问题
     elements_json = json.dumps(elements, ensure_ascii=True)
     style_json    = json.dumps(_make_cytoscape_style(icon_data_uris), ensure_ascii=True)
     legend_html   = _make_legend_html()

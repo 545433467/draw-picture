@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 
+import converter
 import openpyxl
 
 from converter import (
@@ -221,6 +222,36 @@ class BuildGraphAggregationTests(unittest.TestCase):
     def test_dns_service_is_recognized_as_access_layer(self):
         self.assertEqual(get_service_key("prod-dns-entry", "default"), "dns")
         self.assertEqual(get_topology_layer("dns"), "access")
+
+    def test_icon_loader_matches_aliases_and_future_service_pngs(self):
+        png_bytes = b"\x89PNG\r\n\x1a\n"
+        old_icon_dir = converter.ICON_DIR
+        old_cache = converter._ICON_DATA_URI_CACHE
+
+        with tempfile.TemporaryDirectory() as icon_dir:
+            for filename in ("CCE_Deployment.png", "RDS.png", "VPC.png"):
+                with open(os.path.join(icon_dir, filename), "wb") as f:
+                    f.write(png_bytes + filename.encode("ascii"))
+
+            converter.ICON_DIR = icon_dir
+            converter._ICON_DATA_URI_CACHE = None
+            try:
+                cce_icon = converter.get_service_icon_data_uri("cce")
+
+                self.assertTrue(cce_icon.startswith("data:image/png;base64,"))
+                self.assertEqual(
+                    converter.get_service_icon_data_uri("cce_deployment"),
+                    cce_icon,
+                )
+                self.assertEqual(
+                    converter.get_service_icon_data_uri("cce-deployment"),
+                    cce_icon,
+                )
+                self.assertTrue(converter.get_service_icon_data_uri("rds"))
+                self.assertTrue(converter.get_service_icon_data_uri("vpc"))
+            finally:
+                converter.ICON_DIR = old_icon_dir
+                converter._ICON_DATA_URI_CACHE = old_cache
 
     def test_external_k8s_targets_are_aggregated_in_virtual_business(self):
         target_names = [f"checkout-service-{i}" for i in range(1, 9)]
