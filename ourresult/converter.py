@@ -11,7 +11,10 @@ import sys
 import os
 import re
 import argparse
+import base64
 from collections import defaultdict
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 try:
     import openpyxl
@@ -32,6 +35,7 @@ SERVICE_STYLE = {
     "eip":          ("#27AE60", "#1A6B3A", "ellipse"),
     "elb":          ("#16A085", "#0E6655", "roundrectangle"),
     "slb":          ("#16A085", "#0E6655", "roundrectangle"),
+    "dns":          ("#5DADE2", "#2874A6", "ellipse"),
     "nat":          ("#5D6D7E", "#2E4057", "roundrectangle"),
     "vpn":          ("#7F8C8D", "#424949", "roundrectangle"),
     "cdn":          ("#2980B9", "#1A5276", "ellipse"),
@@ -88,7 +92,7 @@ SERVICE_DISPLAY_NAMES = {
     "tomcat": "Tomcat", "mysql": "MySQL",
     "ecs": "ECS", "bms": "BMS", "cce": "CCE", "cci": "CCI",
     "functiongraph": "FunctionGraph",
-    "vpc": "VPC", "eip": "EIP", "elb": "ELB", "slb": "SLB",
+    "vpc": "VPC", "eip": "EIP", "elb": "ELB", "slb": "SLB", "dns": "DNS",
     "nat": "NAT", "vpn": "VPN", "cdn": "CDN", "waf": "WAF",
     "er": "ER", "dli": "DLI",
     "oss": "OSS", "obs": "OBS", "sfs": "SFS", "sfs3": "SFS3", "evs": "EVS", "cbr": "CBR",
@@ -102,6 +106,62 @@ SERVICE_DISPLAY_NAMES = {
     "iam": "IAM", "kms": "KMS",
     "default": "Other",
 }
+
+# PNG icon configuration.
+ICON_DIR = os.path.join(_SCRIPT_DIR, "picture")
+ICON_SIZE = 48
+
+# Expected PNG files under ourresult/picture. Aliases reuse the closest icon so
+# existing spreadsheets do not need to change their service type values.
+SERVICE_ICON_FILES = {
+    "cce": "CCE_Deployment.png",
+    "cce_deployment": "CCE_Deployment.png",
+    "cce_deploym": "CCE_Deployment.png",
+    "cdn": "CDN.png",
+    "dcs": "DCS.png",
+    "redis": "DCS.png",
+    "dns": "DNS.png",
+    "ecs": "ECS.png",
+    "bms": "ECS.png",
+    "elb": "ELB.png",
+    "slb": "ELB.png",
+    "mq": "MQ.png",
+    "dms": "MQ.png",
+    "kafka": "MQ.png",
+    "rabbitmq": "MQ.png",
+    "obs": "OBS.png",
+    "oss": "OBS.png",
+    "sfs": "SFS.png",
+    "sfs3": "SFS.png",
+    "waf": "WAF.png",
+    "zookeeper": "ZooKeeper.png",
+}
+
+_ICON_DATA_URI_CACHE = None
+
+
+def _load_service_icon_data_uris():
+    global _ICON_DATA_URI_CACHE
+    if _ICON_DATA_URI_CACHE is not None:
+        return _ICON_DATA_URI_CACHE
+
+    icons = {}
+    for service_key, filename in SERVICE_ICON_FILES.items():
+        path = os.path.join(ICON_DIR, filename)
+        try:
+            with open(path, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("ascii")
+        except FileNotFoundError:
+            continue
+        icons[service_key] = f"data:image/png;base64,{encoded}"
+
+    _ICON_DATA_URI_CACHE = icons
+    return icons
+
+
+def get_service_icon_data_uri(service_key):
+    return _load_service_icon_data_uris().get(str(service_key or "").casefold(), "")
+
 
 # 从节点名称中识别服务类型的关键词（顺序从精确到宽泛）
 NAME_PATTERNS = [
@@ -130,6 +190,7 @@ NAME_PATTERNS = [
     ("cbr",        "cbr"),
     ("elb",        "elb"),
     ("slb",        "slb"),
+    ("dns",        "dns"),
     ("nat",        "nat"),
     ("waf",        "waf"),
     ("cdn",        "cdn"),
@@ -214,7 +275,7 @@ TOPOLOGY_LAYERS = [
 TOPOLOGY_LAYER_ORDER = {key: index for index, (key, _) in enumerate(TOPOLOGY_LAYERS)}
 TOPOLOGY_LAYER_NAMES = dict(TOPOLOGY_LAYERS)
 
-ACCESS_LAYER_TYPES = {"cdn", "waf", "eip"}
+ACCESS_LAYER_TYPES = {"cdn", "waf", "eip", "dns"}
 NETWORK_LB_LAYER_TYPES = {"elb", "slb", "vpc", "nat", "vpn", "er"}
 COMPUTE_APP_LAYER_TYPES = {
     "ecs", "bms", "cce", "cci", "k8s", "kubernetes", "functiongraph",
@@ -1306,7 +1367,6 @@ def compute_bdat_positions(elements):
 
 # ── HTML 生成辅助 ─────────────────────────────────────────────────────────────
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CYTOSCAPE_PATHS = [
     # 优先使用与 cose-bilkent 插件版本匹配的稳定版
     os.path.join(_SCRIPT_DIR, "..", "cloudmapper-main", "web", "js", "cytoscape.min.js"),
@@ -1337,8 +1397,9 @@ def _read_first(paths):
     return ""
 
 
-def _make_cytoscape_style():
-    return [
+def _make_cytoscape_style(icon_data_uris=None):
+    icon_data_uris = icon_data_uris or {}
+    style = [
         {
             "selector": "node",
             "style": {
@@ -1505,6 +1566,31 @@ def _make_cytoscape_style():
                 "color": "#2C3E50",
             }
         },
+        # Real resources use same-size PNG icons when matching assets exist.
+        {
+            "selector": "node[has_icon = 1][is_summary = 0]",
+            "style": {
+                "label": "data(display_label)",
+                "width": ICON_SIZE,
+                "height": ICON_SIZE,
+                "shape": "rectangle",
+                "background-fit": "contain",
+                "background-clip": "none",
+                "background-width": ICON_SIZE,
+                "background-height": ICON_SIZE,
+                "background-opacity": 1,
+                "background-color": "#FFFFFF",
+                "border-width": 0,
+                "text-valign": "bottom",
+                "text-halign": "center",
+                "text-margin-y": 6,
+                "text-background-color": "#fff",
+                "text-background-opacity": 0.86,
+                "text-background-padding": "2px",
+                "text-max-width": "132px",
+                "text-wrap": "wrap",
+            }
+        },
         # 被折叠资源的摘要节点
         {
             "selector": "node[is_summary = 1]",
@@ -1563,6 +1649,25 @@ def _make_cytoscape_style():
         },
     ]
 
+    for service_key, icon_data_uri in sorted(icon_data_uris.items()):
+        style.append({
+            "selector": f"node[service_key = '{service_key}'][has_icon = 1]",
+            "style": {"background-image": f'url("{icon_data_uri}")'},
+        })
+
+    style.extend([
+        {"selector": "node[has_icon = 1]:selected", "style": {
+            "border-color": "#FFD700",
+            "border-width": 4,
+        }},
+        {"selector": "node[has_icon = 1].highlighted", "style": {
+            "border-color": "#E74C3C",
+            "border-width": 3,
+        }},
+    ])
+
+    return style
+
 
 def _make_legend_html():
     exclude = {"__region__", "__group__", "__business__"}
@@ -1597,8 +1702,18 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
                 e["data"]["bdat_y"] = bdat_pos[nid]["y"]
 
     # ensure_ascii=True：将中文转为 \uXXXX 转义，避免内联 JS 中出现非 ASCII 字符导致的解析问题
+    icon_data_uris = _load_service_icon_data_uris()
+    for e in elements:
+        if e.get("group") != "nodes":
+            continue
+        data = e.get("data", {})
+        if data.get("is_container") or data.get("is_summary"):
+            data["has_icon"] = 0
+            continue
+        data["has_icon"] = 1 if data.get("service_key") in icon_data_uris else 0
+
     elements_json = json.dumps(elements, ensure_ascii=True)
-    style_json    = json.dumps(_make_cytoscape_style(), ensure_ascii=True)
+    style_json    = json.dumps(_make_cytoscape_style(icon_data_uris), ensure_ascii=True)
     legend_html   = _make_legend_html()
 
     layout_options  = '<option value="bdat">BDAT分组层次布局（推荐）</option>\n'

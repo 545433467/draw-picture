@@ -5,10 +5,12 @@ import unittest
 import openpyxl
 
 from converter import (
+    ICON_SIZE,
     MAX_VISIBLE_SERVICE_NODES,
     _make_cytoscape_style,
     build_graph,
     compute_bdat_positions,
+    get_service_key,
     get_topology_layer,
     read_excel,
 )
@@ -195,6 +197,30 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(business_style["text-wrap"], "wrap")
         self.assertEqual(business_style["text-max-width"], "320px")
         self.assertEqual(business_style["text-overflow-wrap"], "anywhere")
+
+    def test_icon_style_uses_fixed_dimensions(self):
+        style = _make_cytoscape_style({"ecs": "data:image/png;base64,abc"})
+        icon_style = next(
+            item["style"] for item in style
+            if item["selector"] == "node[has_icon = 1][is_summary = 0]"
+        )
+        image_style = next(
+            item["style"] for item in style
+            if item["selector"] == "node[service_key = 'ecs'][has_icon = 1]"
+        )
+
+        self.assertEqual(icon_style["width"], ICON_SIZE)
+        self.assertEqual(icon_style["height"], ICON_SIZE)
+        self.assertEqual(icon_style["background-width"], ICON_SIZE)
+        self.assertEqual(icon_style["background-height"], ICON_SIZE)
+        self.assertEqual(
+            image_style["background-image"],
+            'url("data:image/png;base64,abc")',
+        )
+
+    def test_dns_service_is_recognized_as_access_layer(self):
+        self.assertEqual(get_service_key("prod-dns-entry", "default"), "dns")
+        self.assertEqual(get_topology_layer("dns"), "access")
 
     def test_external_k8s_targets_are_aggregated_in_virtual_business(self):
         target_names = [f"checkout-service-{i}" for i in range(1, 9)]
