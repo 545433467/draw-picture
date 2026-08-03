@@ -1031,6 +1031,13 @@ def build_graph(records):
     for entry in entries:
         service_groups[entry["group_key"]].append(entry)
 
+    # CCE_Deployment 分组键（含企业项目）。这些组不渲染单个资源节点，
+    # 由每企业项目一个聚合节点代替。
+    cce_project_group_keys = {
+        group_key for group_key in service_groups
+        if split_group_key(group_key)[4] is not None
+    }
+
     visible_indexes = set()
     group_info = {}
     for group_index, (group_key, group_entries) in enumerate(service_groups.items()):
@@ -1058,7 +1065,8 @@ def build_graph(records):
         }
 
     for entry in entries:
-        if entry["index"] in visible_indexes:
+        if (entry["index"] in visible_indexes
+                and entry["group_key"] not in cce_project_group_keys):
             nodes.append({"group": "nodes", "data": entry["data"]})
 
     def make_summary_resource(entry):
@@ -1068,6 +1076,8 @@ def build_graph(records):
             "name": d.get("name", ""),
             "type": (r.get("type") or d.get("type") or "").upper(),
             "service_name": get_service_display_name(d.get("service_key", "default")),
+            "resource_id": d.get("resource_id", ""),
+            "spec": d.get("spec", ""),
             "project": d.get("enterprise_id", ""),
             "business": d.get("business", ""),
             "group": d.get("group_label", ""),
@@ -1080,6 +1090,8 @@ def build_graph(records):
 
     # 每个超限组只增加一个摘要节点；摘要节点承接组内隐藏资源的连线。
     for group_key, info in group_info.items():
+        if group_key in cce_project_group_keys:
+            continue
         hidden_count = len(info["hidden"])
         if not hidden_count:
             continue
@@ -1131,19 +1143,24 @@ def build_graph(records):
     for entry in entries:
         business_totals[entry["data"]["business_key"]] += 1
     _biz_counter = 0
-    for n in nodes:
-        biz_key = n["data"].get("business_key", "").strip()
+    # 从全部 entries 建立业务容器映射（CCE 聚合组不渲染资源节点，
+    # 但其所属业务仍需要容器）。
+    for entry in entries:
+        biz_key = entry["data"].get("business_key", "").strip()
         if not biz_key:
             continue
         if biz_key not in business_map:
             business_map[biz_key] = f"biz_{_biz_counter}"
             business_meta[biz_key] = {
-                "name": n["data"].get("business", ""),
-                "is_virtual": n["data"].get("is_virtual_business", 0),
+                "name": entry["data"].get("business", ""),
+                "is_virtual": entry["data"].get("is_virtual_business", 0),
             }
             _biz_counter += 1
-        n["data"]["parent"] = business_map[biz_key]
-        n["data"]["is_grouped_resource"] = 1
+    for n in nodes:
+        biz_key = n["data"].get("business_key", "").strip()
+        if biz_key and biz_key in business_map:
+            n["data"]["parent"] = business_map[biz_key]
+            n["data"]["is_grouped_resource"] = 1
 
     biz_containers = []
     for i, (biz_key, biz_id) in enumerate(business_map.items()):
@@ -1208,8 +1225,9 @@ def build_graph(records):
                 "shape":           "roundrectangle",
             }})
 
-    # 服务容器按 (业务, 层, 服务) 去重创建；CCE_Deployment 组按企业项目
-    # 细分为 __project__ 子容器（框名取“企业项目”字段），普通资源保持原层级。
+    # 服务容器按 (业务, 层, 服务) 去重创建；CCE_Deployment 组不再渲染任何
+    # 资源节点，每个企业项目只生成一个聚合节点 __cce_project__（名字为企业
+    # 项目），其下带一个数字徽标 __cce_count__ 表示节点总数。
     service_agg = {}
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
@@ -1225,7 +1243,8 @@ def build_graph(records):
             agg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
     service_container_ids = {}
-    project_containers = []
+    cce_project_nodes = []
+    cce_count_nodes = []
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
@@ -1269,33 +1288,39 @@ def build_graph(records):
 
         if project_key is not None:
             prj_parent = sc_id if sc_id else layer_id
-            # 企业项目名可能含中文等非 ASCII 字符，safe_id 会使其互相撞 ID，
-            # 因此改用唯一的分组序号生成容器 ID。
-            prj_id = f"prj_{group_meta['group_index']}"
-            project_containers.append({"group": "nodes", "data": {
+            prj_id = f"ccep_{group_meta['group_index']}"
+            sample_entry = info[0]
+            sample_data = sample_entry["data"]
+            cce_project_nodes.append({"group": "nodes", "data": {
                 "id":              prj_id,
                 "name":            group_meta["project_label"],
-                "type":            "__project__",
+                "type":            "__cce_project__",
                 "service_key":     svc_key,
                 "layer_key":       layer_key,
                 "layer_name":      get_topology_layer_name(layer_key),
+                "business":        sample_data.get("business", ""),
+                "business_key":    biz_key,
                 "resource_total":  len(info),
-                "visible_count":   len(group_meta["visible"]),
-                "collapsed_count": len(group_meta["hidden"]),
+                "cce_resources":   [
+                    make_summary_resource(entry) for entry in info
+                ],
+                "cce_business_prefix": sample_data.get("cce_business_prefix", ""),
+                "enterprise_project": group_meta["project_label"],
                 "is_container":    1,
                 "parent":          prj_parent,
-                "bg_color":        "#EAF7F5",
-                "border_color":    "#48C9B0",
+                "bg_color":        "#EBF5FB",
+                "border_color":    "#2C5F8A",
                 "shape":           "roundrectangle",
             }})
-            for node_id in rendered_ids:
-                node = node_by_id.get(node_id)
-                if node:
-                    node["data"]["parent"] = prj_id
-                    node["data"]["project_container"] = prj_id
-                    if sc_id:
-                        node["data"]["service_container"] = sc_id
-                    node["data"]["layer_container"] = layer_id
+            cce_count_nodes.append({"group": "nodes", "data": {
+                "id":              f"ccecnt_{group_meta['group_index']}",
+                "name":            str(len(info)),
+                "type":            "__cce_count__",
+                "resource_total":  len(info),
+                "parent":          prj_id,
+                "is_container":    0,
+                "is_summary":      0,
+            }})
         elif sc_id is not None:
             for node_id in rendered_ids:
                 node = node_by_id.get(node_id)
@@ -1305,24 +1330,30 @@ def build_graph(records):
                     node["data"]["layer_container"] = layer_id
 
     nodes = (biz_containers + layer_containers + service_containers
-             + project_containers + nodes)
+             + cce_project_nodes + cce_count_nodes + nodes)
 
     # ── 3. 创建边 ─────────────────────────────────────────────────────────
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
+        if entry["group_key"] in cce_project_group_keys:
+            return f"ccep_{group_info[entry['group_key']]['group_index']}"
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
         return group_info[entry["group_key"]]["summary_id"]
 
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
+        if entry["group_key"] in cce_project_group_keys:
+            return f"ccep_{group_info[entry['group_key']]['group_index']}"
         if entry["group_key"]:
             return group_info[entry["group_key"]]["first_id"]
         return entry["data"]["id"]
 
     def add_edge(src_id, tgt_id, source_name, target_name, cross_biz,
                  relation="调用", inferred=False):
+        if src_id == tgt_id:
+            return
         key = (src_id, tgt_id, inferred)
         if key in edge_lookup:
             edge_data = edge_lookup[key]
@@ -1448,7 +1479,9 @@ def compute_bdat_positions(elements):
     leaf_nodes = {}
     edges_list = []
     for e in elements:
-        if e["group"] == "nodes" and not e["data"].get("is_container"):
+        if e["group"] == "nodes" and e["data"].get("type") != "__cce_count__" and (
+                not e["data"].get("is_container")
+                or e["data"].get("type") == "__cce_project__"):
             leaf_nodes[e["data"]["id"]] = e["data"]
         elif e["group"] == "edges":
             edges_list.append((e["data"]["source"], e["data"]["target"]))
@@ -1823,24 +1856,49 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "shape": "roundrectangle",
             }
         },
-        # 企业项目子容器（CCE_Deployment 业务内按企业项目分组）
+        # CCE_Deployment 企业项目聚合节点（每个企业项目一个节点，名字为企业项目）
         {
-            "selector": "node[type = '__project__']",
+            "selector": "node[type = '__cce_project__']",
             "style": {
-                "border-color": "#48C9B0",
-                "border-width": 1,
-                "border-style": "dashed",
-                "background-color": "#EAF7F5",
-                "background-opacity": 0.5,
-                "font-size": 10,
-                "font-weight": "bold",
-                "color": "#117864",
-                "text-valign": "top",
-                "text-background-color": "#fff",
-                "text-background-opacity": 0.9,
-                "text-background-padding": "3px",
-                "padding": "18px",
+                "label": "data(name)",
+                "width": 150,
+                "height": 60,
                 "shape": "roundrectangle",
+                "background-color": "data(bg_color)",
+                "background-opacity": 0.16,
+                "border-color": "data(border_color)",
+                "border-width": 2,
+                "border-style": "solid",
+                "font-size": 11,
+                "font-weight": "bold",
+                "color": "#2C3E50",
+                "text-valign": "top",
+                "text-halign": "center",
+                "text-background-color": "#fff",
+                "text-background-opacity": 0.85,
+                "text-background-padding": "2px",
+                "text-wrap": "wrap",
+                "text-max-width": "140px",
+                "padding": "20px",
+            }
+        },
+        # CCE 企业项目数量徽标（圆圈 + 数字）
+        {
+            "selector": "node[type = '__cce_count__']",
+            "style": {
+                "label": "data(name)",
+                "width": 30,
+                "height": 30,
+                "shape": "ellipse",
+                "background-color": "#E74C3C",
+                "border-color": "#FFFFFF",
+                "border-width": 2,
+                "font-size": 13,
+                "font-weight": "bold",
+                "color": "#FFFFFF",
+                "text-valign": "center",
+                "text-halign": "center",
+                "text-background-opacity": 0,
             }
         },
         # 聚合资源固定显示两行：服务统称 + 截短后的 resource_name
@@ -1992,7 +2050,9 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     # 计算 BDAT 分组层次布局坐标并注入节点数据
     bdat_pos = compute_bdat_positions(elements)
     for e in elements:
-        if e["group"] == "nodes" and not e["data"].get("is_container"):
+        if e["group"] == "nodes" and e["data"].get("type") != "__cce_count__" and (
+                not e["data"].get("is_container")
+                or e["data"].get("type") == "__cce_project__"):
             nid = e["data"]["id"]
             if nid in bdat_pos:
                 e["data"]["bdat_x"] = bdat_pos[nid]["x"]
@@ -2030,14 +2090,25 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     # 统计数字
     visible_resources = sum(1 for e in elements if e.get("group") == "nodes"
                             and not e["data"].get("is_container")
-                            and not e["data"].get("is_summary"))
+                            and not e["data"].get("is_summary")
+                            and e["data"].get("type") != "__cce_count__")
+    cce_project_nodes = [e for e in elements if e.get("group") == "nodes"
+                         and e["data"].get("type") == "__cce_project__"]
     summary_nodes = sum(1 for e in elements if e.get("group") == "nodes"
                         and e["data"].get("is_summary"))
     collapsed_resources = sum(e["data"].get("collapsed_count", 0) for e in elements
                               if e.get("group") == "nodes" and e["data"].get("is_summary"))
-    total_resources = visible_resources + collapsed_resources
-    resource_stat = (f"{visible_resources + summary_nodes} 可见 / {total_resources} 资源"
-                     if collapsed_resources else f"{total_resources} 节点")
+    cce_project_total = sum(
+        node["data"].get("resource_total", 0) for node in cce_project_nodes
+    )
+    total_resources = (visible_resources + collapsed_resources
+                       + cce_project_total)
+    resource_stat = (
+        f"{visible_resources + summary_nodes + len(cce_project_nodes)} 可见 / "
+        f"{total_resources} 资源"
+        if (collapsed_resources or cce_project_nodes)
+        else f"{total_resources} 节点"
+    )
     n_edges = sum(1 for e in elements if e.get("group") == "edges")
     n_infer = sum(1 for e in elements if e.get("group") == "edges"
                   and e["data"].get("inferred") == 1)
@@ -2186,8 +2257,10 @@ setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
 cy.on('tap', 'node', function(evt) {{
   var d  = evt.target.data();
   var bg = d.bg_color || '#888';
-  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__' || d.type === '__project__') {{
+  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__') {{
     showContainerDetail(d);
+  }} else if (d.type === '__cce_project__' || d.type === '__cce_count__') {{
+    showCceProjectDetail(d);
   }} else if (d.is_summary === 1) {{
     showSummaryDetail(d);
   }} else {{
@@ -2272,7 +2345,8 @@ function showNodeDetail(d, bg) {{
   var nbrs  = src.neighborhood().nodes().filter(function(n) {{
     var t = n.data('type');
     return t !== '__region__' && t !== '__group__' && t !== '__business__' &&
-           t !== '__layer__' && t !== '__service__' && t !== '__project__';
+           t !== '__layer__' && t !== '__service__' && t !== '__cce_project__' &&
+           t !== '__cce_count__';
   }});
   if (nbrs.length > 0) {{
     html += '<div class="d-row"><div class="d-label">相邻节点</div><div class="d-value">';
@@ -2327,22 +2401,66 @@ function showSummaryDetail(d) {{
     '<span class="tag" style="background:#7F8C8D">省略节点</span>';
 }}
 
+function showCceProjectDetail(d) {{
+  if (d.type === '__cce_count__' && d.parent) {{
+    d = cy.getElementById(d.parent).data();
+  }}
+  var html = '<div class="d-row"><div class="d-label">企业项目</div>' +
+             '<div class="d-value">'+escHtml(d.name || '-')+'</div></div>' +
+             '<div class="d-row"><div class="d-label">所属业务</div>' +
+             '<div class="d-value">'+escHtml(d.business || '-')+'</div></div>' +
+             '<div class="d-row"><div class="d-label">所属层</div>' +
+             '<div class="d-value">'+escHtml(d.layer_name || '-')+'</div></div>' +
+             '<div class="d-row"><div class="d-label">CCE_Deployment 数量</div>' +
+             '<div class="d-value">'+escHtml(d.resource_total || 0)+'</div></div>';
+  if (d.cce_business_prefix) {{
+    html += '<div class="d-row"><div class="d-label">CCE业务前缀</div>' +
+            '<div class="d-value">'+escHtml(d.cce_business_prefix)+'</div></div>';
+  }}
+  var resources = d.cce_resources || [];
+  if (resources.length > 0) {{
+    html += '<div class="d-row"><div class="d-label">包含节点明细</div><div class="d-value">';
+    resources.forEach(function(item, index) {{
+      var downstream = (item.downstream || []).join(', ') || '-';
+      var inferredDownstream = (item.inferred_downstream || []).join(', ') || '-';
+      html += '<div style="border:1px solid #E5E7EB;border-radius:4px;padding:7px 8px;' +
+              'margin:6px 0;background:#FAFAFA">';
+      html += '<div style="font-weight:700;color:#2C3E50;margin-bottom:5px">' +
+              (index + 1)+'. '+escHtml(item.name || '-')+'</div>';
+      html += '<div><strong>类型：</strong>'+escHtml(item.service_name || item.type || '-')+'</div>';
+      html += '<div><strong>资源ID：</strong>'+escHtml(item.resource_id || '-')+'</div>';
+      html += '<div><strong>项目/业务：</strong>'+escHtml((item.project || '-') + ' / ' + (item.business || '-'))+'</div>';
+      html += '<div><strong>区域：</strong>'+escHtml(item.region || '-')+'</div>';
+      html += '<div><strong>分组：</strong>'+escHtml(item.group || '-')+'</div>';
+      html += '<div><strong>规格：</strong>'+escHtml(item.spec || '-')+'</div>';
+      html += '<div><strong>描述：</strong>'+escHtml(item.desc || '-')+'</div>';
+      html += '<div><strong>下游：</strong>'+escHtml(downstream)+'</div>';
+      if (inferredDownstream !== '-') {{
+        html += '<div><strong>推断下游：</strong>'+escHtml(inferredDownstream)+'</div>';
+      }}
+      html += '</div>';
+    }});
+    html += '</div></div>';
+  }}
+  document.getElementById('detail-panel').innerHTML = html;
+  document.getElementById('node-type-tag').innerHTML =
+    '<span class="tag" style="background:#2C5F8A">CCE_Deployment</span>';
+}}
+
 function showContainerDetail(d) {{
   var label = d.type === '__region__' ? '区域'
             : d.type === '__business__' ? '所属业务'
             : d.type === '__layer__' ? '业务层'
             : d.type === '__service__' ? '服务类型'
-            : d.type === '__project__' ? '企业项目'
             : '资源分组';
   var tagColor = d.type === '__business__' ? '#1ABC9C'
                : d.type === '__layer__' ? '#5D6D7E'
                : d.type === '__service__'  ? '#7F8C8D'
-               : d.type === '__project__'  ? '#117864'
                : '#2E86C1';
   var html = '<div class="d-row"><div class="d-label">'+label+'</div>' +
              '<div class="d-value">'+escHtml(d.name)+'</div></div>';
   var children = cy.getElementById(d.id).descendants().filter(function(n) {{
-    return !n.data('is_container');
+    return !n.data('is_container') && n.data('type') !== '__cce_count__';
   }});
   var total = d.resource_total || children.filter(function(n) {{ return !n.data('is_summary'); }}).length;
   html += '<div class="d-row"><div class="d-label">包含资源 ('+total+')</div><div class="d-value">';
@@ -2431,11 +2549,11 @@ function toggleBusinessView() {{
         n.move({{ parent: null }});
       }}
     }});
-    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"],[type = "__project__"]').style('display', 'none');
+    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"]').style('display', 'none');
     btn.innerHTML = '&#127968; 业务分组:关';
     btn.style.background = 'rgba(255,255,255,.15)';
   }} else {{
-    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"],[type = "__project__"]').style('display', 'element');
+    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"]').style('display', 'element');
     Object.keys(_origParents).forEach(function(nid) {{
       cy.getElementById(nid).move({{ parent: _origParents[nid] }});
     }});
