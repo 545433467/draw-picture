@@ -582,14 +582,20 @@ class BuildGraphAggregationTests(unittest.TestCase):
             node for node in nodes
             if node.get("service_key") == "cce"
             and not node.get("is_container") and not node.get("is_summary")
-            and node.get("type") != "__cce_count__"
+            and node.get("type") != "__cce_project__"
         ]
 
         # 每个企业项目只有一个聚合节点，名字为企业项目
         self.assertEqual({node["name"] for node in projects}, {"ep-A", "ep-B"})
         self.assertEqual({node["resource_total"] for node in projects}, {1, 2})
-        self.assertEqual(len(badges), 2)
-        self.assertEqual({node["name"] for node in badges}, {"1", "2"})
+        self.assertEqual(badges, [])
+        # 聚合节点带 cce 服务键以便读取 CCE_Deployment.png 图标，
+        # 数字（总数）显示在 display_label 第二行（图标下方）。
+        self.assertTrue(all(node["service_key"] == "cce" for node in projects))
+        self.assertTrue(all(
+            node["display_label"].splitlines()[-1] == str(node["resource_total"])
+            for node in projects
+        ))
         # 不再渲染任何单个 CCE_Deployment 节点
         self.assertEqual(cce_leaves, [])
 
@@ -607,19 +613,15 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        node_by_id = {node["id"]: node for node in nodes}
         projects = [node for node in nodes if node.get("type") == "__cce_project__"]
         project_by_name = {node["name"]: node for node in projects}
         ep_a = project_by_name["ep-A"]
-        ep_a_badge = next(
-            node for node in nodes
-            if node.get("type") == "__cce_count__"
-            and node.get("parent") == ep_a["id"]
-        )
 
         self.assertEqual(ep_a["resource_total"], 8)
-        self.assertEqual(ep_a_badge["name"], "8")
+        self.assertEqual(ep_a["display_label"], "ep-A\n8")
+        self.assertEqual(ep_a["service_key"], "cce")
         self.assertEqual(project_by_name["ep-B"]["resource_total"], 3)
+        self.assertFalse(any(node.get("type") == "__cce_count__" for node in nodes))
         # CCE 组不再生成摘要节点
         self.assertFalse(any(node.get("is_summary") for node in nodes))
 
