@@ -18,14 +18,15 @@ from converter import (
 
 
 def make_record(name, business="业务A", service_type="cce_deploym", targets="",
-                inferred_targets="", reason="", source=""):
+                inferred_targets="", reason="", source="", enterprise_id="",
+                group=""):
     return {
         "name": name,
         "type": service_type,
         "resource_id": f"id-{name}",
-        "enterprise_id": "",
+        "enterprise_id": enterprise_id,
         "region": "cn-test-1",
-        "group": "",
+        "group": group,
         "business": business,
         "desc": "",
         "spec": "",
@@ -561,6 +562,116 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(len({pos["y"] for pos in ordered_positions[:4]}), 1)
         self.assertEqual(len({pos["x"] for pos in ordered_positions[:4]}), 4)
         self.assertGreater(ordered_positions[4]["y"], ordered_positions[0]["y"])
+
+    def test_cce_deployment_resources_group_by_name_prefix(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj-prod-app-deploy-2", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-B"),
+            make_record("bj4-prod-app-deploy-1", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        businesses = [node for node in nodes if node.get("type") == "__business__"]
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
+
+        self.assertEqual(
+            {node["name"] for node in businesses},
+            {"bj-prod-app", "bj4-prod-app"},
+        )
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-1"]["business"],
+                         "bj-prod-app")
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-1"]["source_business"],
+                         "业务A")
+        self.assertEqual(leaf_by_name["bj4-prod-app-deploy-1"]["business"],
+                         "bj4-prod-app")
+
+    def test_cce_deployment_resources_split_by_enterprise_project(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj-prod-app-deploy-2", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj-prod-app-deploy-3", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-B"),
+            make_record("bj-prod-app-deploy-4", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-B"),
+            make_record("bj-prod-app-deploy-5", service_type="cce",
+                        group="CCE_Deployment", enterprise_id=""),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        node_by_id = {node["id"]: node for node in nodes}
+        projects = [node for node in nodes if node.get("type") == "__project__"]
+        leaves = [
+            node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        ]
+
+        self.assertEqual(
+            {node["name"] for node in projects},
+            {"ep-A", "ep-B", "(未设置企业项目)"},
+        )
+        for leaf in leaves:
+            parent = node_by_id[leaf["parent"]]
+            self.assertEqual(parent["type"], "__project__")
+            self.assertEqual(parent["name"], leaf["enterprise_project"]
+                             or "(未设置企业项目)")
+            self.assertEqual(parent["parent"],
+                             node_by_id[leaf["service_container"]]["id"])
+
+    def test_cce_deployment_summarizes_per_enterprise_project(self):
+        records = []
+        for index in range(8):
+            records.append(make_record(
+                f"bj-prod-app-deploy-a-{index}", service_type="cce",
+                group="CCE_Deployment", enterprise_id="ep-A",
+            ))
+            records.append(make_record(
+                f"bj-prod-app-deploy-b-{index}", service_type="cce",
+                group="CCE_Deployment", enterprise_id="ep-B",
+            ))
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        projects = {
+            node["name"]: node for node in nodes
+            if node.get("type") == "__project__"
+        }
+        summaries = [node for node in nodes if node.get("is_summary")]
+        project_ids = {node["id"] for node in nodes
+                       if node.get("type") == "__project__"}
+
+        self.assertEqual(set(projects), {"ep-A", "ep-B"})
+        self.assertEqual(projects["ep-A"]["visible_count"],
+                         MAX_VISIBLE_SERVICE_NODES)
+        self.assertEqual(projects["ep-A"]["collapsed_count"], 3)
+        self.assertEqual(len(summaries), 2)
+        self.assertTrue(all(summary["parent"] in project_ids
+                            for summary in summaries))
+
+    def test_non_cce_deployment_resources_keep_business_column_grouping(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", service_type="cce",
+                        business="业务A", enterprise_id="ep-A"),
+            make_record("bj4-prod-app-deploy-2", service_type="cce",
+                        business="业务A", enterprise_id="ep-B"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        businesses = [node for node in nodes if node.get("type") == "__business__"]
+        projects = [node for node in nodes if node.get("type") == "__project__"]
+
+        self.assertEqual([node["name"] for node in businesses], ["业务A"])
+        self.assertEqual(projects, [])
 
 
 if __name__ == "__main__":
