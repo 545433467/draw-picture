@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-生成示例 Excel，展示 converter.py 所需的列格式。
+生成示例 Excel（约 1000 个节点），展示 converter.py 所需的列格式。
 运行: py create_sample.py
 """
+
+import random
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -17,7 +19,7 @@ def create_sample():
 
     headers = [
         "region", "resource name", "resource id", "resource_type",
-        "enterprise_project_id", "资源分组",
+        "enterprise_project_id", "企业项目", "资源分组", "所属业务",
         "下游服务", "下游服务(推断)", "推断原因",
     ]
 
@@ -33,90 +35,143 @@ def create_sample():
         c.border = border
     ws.row_dimensions[1].height = 28
 
-    # ── 示例数据（模拟一个华为云环境下的典型 Web 应用架构）──────────────────
-    # region | resource name | resource id | resource_type | enterprise_project_id
-    # | 资源分组 | 下游服务 | 下游服务(推断) | 推断原因
-    rows = [
-        # ── 公网接入层 ──────────────────────────────────────────────────────
-        ["cn-north-4", "waf-prod-01",     "waf-a1b2c3", "WAF",
-         "ep-prod-001", "公网接入层",
-         "elb-prod-01", "",
-         "WAF 检测到请求后转发至 ELB，直接调用关系，来源：安全组规则配置"],
+    # ── 生成约 1000 个节点的模拟数据 ────────────────────────────────────────
+    random.seed(20260803)
 
-        ["cn-north-4", "elb-prod-01",     "elb-d4e5f6", "ELB",
-         "ep-prod-001", "公网接入层",
-         "ecs-web-01,ecs-web-02", "nat-prod-01",
-         "ELB 后端服务器组包含 ecs-web-01/02；NAT 网关与 ELB 同子网，推断存在出口流量关系"],
+    businesses = ["订单业务", "支付业务", "用户中心", "风控业务", "数据平台"]
+    biz_keys   = {"订单业务": "order", "支付业务": "pay", "用户中心": "user",
+                  "风控业务": "risk", "数据平台": "data"}
+    projects = [("生产项目", "ep-prod-001"),
+                ("测试项目", "ep-test-002"),
+                ("预发项目", "ep-stage-003")]
+    regions = ["cn-north-4", "cn-east-3"]
 
-        # ── Web 应用层 ───────────────────────────────────────────────────────
-        ["cn-north-4", "ecs-web-01",      "ecs-11111111", "ECS",
-         "ep-prod-001", "Web应用层",
-         "rds-prod-master,dcs-redis-01,obs-prod-01", "apig-prod-01",
-         "配置文件中 DB_HOST 指向 rds-prod-master；缓存地址指向 dcs-redis-01；"
-         "应用日志写入 OBS；同子网存在 APIG，推断存在 API 路由"],
+    def pick_project():
+        r = random.random()
+        if r < 0.6:
+            return projects[0]
+        if r < 0.85:
+            return projects[1]
+        return projects[2]
 
-        ["cn-north-4", "ecs-web-02",      "ecs-22222222", "ECS",
-         "ep-prod-001", "Web应用层",
-         "rds-prod-master,dcs-redis-01,obs-prod-01", "apig-prod-01",
-         "同 ecs-web-01 配置相同，为水平扩展副本"],
+    def make_row(name, rtype, group, biz, region=None, down="",
+                 inferred="", reason=""):
+        proj_name, proj_id = pick_project()
+        return [
+            region or random.choice(regions), name, f"id-{name}", rtype,
+            proj_id, proj_name, group, biz, down, inferred, reason,
+        ]
 
-        # ── API 网关 ─────────────────────────────────────────────────────────
-        ["cn-north-4", "apig-prod-01",    "apig-aabbcc", "APIG",
-         "ep-prod-001", "API网关",
-         "ecs-web-01,ecs-web-02", "",
-         "APIG 后端服务配置指向 ecs-web-01/02"],
+    rows = []
 
-        # ── 缓存 / 数据库层 ───────────────────────────────────────────────────
-        ["cn-north-4", "dcs-redis-01",    "dcs-cc3344", "DCS",
-         "ep-prod-001", "缓存层",
-         "", "dcs-redis-slave",
-         "Redis 主从架构，主节点写，推断存在从节点同步"],
+    # 各业务的通用服务（每业务 54 个基础资源）
+    for biz in businesses:
+        bk = biz_keys[biz]
+        r = lambda name, rtype, group, **kw: make_row(
+            name, rtype, group, biz, **kw)
 
-        ["cn-north-4", "dcs-redis-slave", "dcs-cc3345", "DCS",
-         "ep-prod-001", "缓存层",
-         "", "",
-         ""],
+        for i in range(1, 3):
+            rows.append(r(f"waf-{bk}-{i:02d}", "WAF", "公网接入层"))
+        for i in range(1, 5):
+            rows.append(r(f"elb-{bk}-{i:02d}", "ELB", "接入与负载层"))
+        for i in range(1, 13):
+            rows.append(r(f"ecs-{bk}-web-{i:02d}", "ECS", "Web应用层"))
+        for i in range(1, 4):
+            rows.append(r(f"apig-{bk}-{i:02d}", "APIG", "API网关"))
+        for i in range(1, 5):
+            rows.append(r(f"dcs-{bk}-redis-{i:02d}", "DCS", "缓存层"))
+        rows.append(r(f"rds-{bk}-master", "RDS", "数据库层"))
+        for i in range(1, 6):
+            rows.append(r(f"rds-{bk}-slave-{i:02d}", "RDS", "数据库层"))
+        for i in range(1, 5):
+            rows.append(r(f"dms-{bk}-kafka-{i:02d}", "DMS", "消息队列"))
+        for i in range(1, 6):
+            rows.append(r(f"obs-{bk}-{i:02d}", "OBS", "对象存储"))
+        for i in range(1, 4):
+            rows.append(r(f"nat-{bk}-{i:02d}", "NAT", "网络出口"))
+        for i in range(1, 5):
+            rows.append(r(f"vpc-{bk}-{i:02d}", "VPC", "网络"))
+        for i in range(1, 6):
+            rows.append(r(f"eip-{bk}-{i:02d}", "EIP", "公网IP"))
+        for i in range(1, 3):
+            rows.append(r(f"cdn-{bk}-{i:02d}", "CDN", "接入层"))
 
-        ["cn-north-4", "rds-prod-master", "rds-55667788", "RDS",
-         "ep-prod-001", "数据库层",
-         "rds-prod-slave", "",
-         "RDS 高可用主备模式，主库向备库同步"],
+        # CCE_Deployment（每个业务 132 个，走企业项目聚合）
+        for i in range(1, 133):
+            rows.append(r(
+                f"bj-{bk}-deploy-{i:03d}", "CCE_Deployment", "CCE_Deployment",
+                region="cn-north-4",
+                down=(f"rds-{bk}-master,dcs-{bk}-redis-01"
+                      if i % 25 == 0 else ""),
+                reason=("ConfigMap 包含数据库、缓存连接串"
+                        if i % 25 == 0 else ""),
+            ))
 
-        ["cn-north-4", "rds-prod-slave",  "rds-55667799", "RDS",
-         "ep-prod-001", "数据库层",
-         "", "",
-         ""],
+        # CCE 集群节点（非 CCE_Deployment，正常展示）
+        for i in range(1, 5):
+            rows.append(r(f"cce-{bk}-cluster-{i:02d}", "CCE", "K8s集群"))
 
-        # ── 消息队列 ─────────────────────────────────────────────────────────
-        ["cn-north-4", "dms-kafka-01",    "dms-aac001", "DMS",
-         "ep-prod-001", "消息队列",
-         "", "ecs-worker-01",
-         "Kafka topic 订阅关系在配置中心配置，ecs-worker-01 为消费者，推断连接"],
+        # 数据平台类扩展服务
+        for i in range(1, 3):
+            rows.append(r(f"css-{bk}-{i:02d}", "CSS", "检索服务"))
+            rows.append(r(f"dds-{bk}-{i:02d}", "DDS", "数据库层"))
+            rows.append(r(f"swr-{bk}-{i:02d}", "SWR", "容器镜像"))
+            rows.append(r(f"cci-{bk}-{i:02d}", "CCI", "容器实例"))
+        for i in range(1, 4):
+            rows.append(r(f"functiongraph-{bk}-{i:02d}", "FunctionGraph",
+                          "函数计算"))
 
-        ["cn-north-4", "ecs-worker-01",   "ecs-33333333", "ECS",
-         "ep-prod-001", "后台任务层",
-         "rds-prod-master,obs-prod-01", "dms-kafka-01",
-         "Worker 消费 Kafka 消息，写库写 OBS；Kafka 来源为推断，需人工核实"],
+    # ── 关键调用关系（确认边 + 推断边）──────────────────────────────────────
+    for biz in businesses:
+        bk = biz_keys[biz]
+        set_fields = {}
 
-        # ── 存储 ──────────────────────────────────────────────────────────────
-        ["cn-north-4", "obs-prod-01",     "obs-bucket-prod", "OBS",
-         "ep-prod-001", "对象存储",
-         "", "",
-         ""],
+        def patch(name, **fields):
+            set_fields[name] = fields
 
-        # ── 网络出口 ──────────────────────────────────────────────────────────
-        ["cn-north-4", "nat-prod-01",     "nat-ff0011", "NAT",
-         "ep-prod-001", "网络出口",
-         "", "obs-prod-01",
-         "NAT 网关出口规则中包含 OBS 域名，推断服务通过 NAT 访问 OBS"],
+        patch(f"elb-{bk}-01",
+              down=f"ecs-{bk}-web-01,ecs-{bk}-web-02",
+              inferred=f"nat-{bk}-01",
+              reason="ELB 后端服务器组包含 ecs-web-01/02；NAT 网关与 ELB "
+                     "同子网，推断存在出口流量关系")
+        patch(f"apig-{bk}-01",
+              down=f"ecs-{bk}-web-01,ecs-{bk}-web-02",
+              reason="APIG 后端服务配置指向 ecs-web-01/02")
+        patch(f"ecs-{bk}-web-01",
+              down=f"rds-{bk}-master,dcs-{bk}-redis-01,obs-{bk}-01",
+              inferred=f"apig-{bk}-01",
+              reason="配置文件中 DB_HOST 指向 RDS；缓存地址指向 DCS；"
+                     "日志写入 OBS；同子网存在 APIG，推断存在 API 路由")
+        patch(f"ecs-{bk}-web-02",
+              down=f"rds-{bk}-master,dcs-{bk}-redis-01",
+              reason="同 ecs-web-01 配置相同，为水平扩展副本")
+        patch(f"rds-{bk}-master",
+              down=f"rds-{bk}-slave-01",
+              reason="RDS 高可用主备模式，主库向备库同步")
+        patch(f"dcs-{bk}-redis-01",
+              inferred=f"dcs-{bk}-redis-02",
+              reason="Redis 主从架构，主节点写，推断存在从节点同步")
+        patch(f"dms-{bk}-kafka-01",
+              inferred=f"ecs-{bk}-web-02",
+              reason="Kafka topic 订阅关系在配置中心配置，推断存在消费者")
+        patch(f"nat-{bk}-01",
+              inferred=f"obs-{bk}-01",
+              reason="NAT 网关出口规则中包含 OBS 域名，推断服务经 NAT 访问 OBS")
 
-        # ── CCE（K8s）集群 ─────────────────────────────────────────────────────
-        ["cn-north-4", "cce-cluster-01",  "cce-99001122", "CCE",
-         "ep-prod-001", "K8s工作节点",
-         "rds-prod-master,dcs-redis-01,dms-kafka-01", "obs-prod-01",
-         "K8s ConfigMap 中包含数据库、缓存连接串；OBS 作为持久卷，属推断关系"],
-    ]
+    # 将调用关系回填到对应行
+    name_to_row = {row[1]: row for row in rows}
+    for name, fields in set_fields.items():
+        row = name_to_row.get(name)
+        if not row:
+            continue
+        if "down" in fields:
+            row[8] = fields["down"]
+        if "inferred" in fields:
+            row[9] = fields["inferred"]
+        if "reason" in fields:
+            row[10] = fields["reason"]
 
+    # ── 写回 Excel ───────────────────────────────────────────────────────────
     alt_fill = [PatternFill("solid", fgColor="EBF5FB"),
                 PatternFill("solid", fgColor="FFFFFF")]
     for i, row_data in enumerate(rows, 2):
@@ -124,11 +179,10 @@ def create_sample():
             c = ws.cell(row=i, column=col, value=val)
             c.fill   = alt_fill[i % 2]
             c.border = border
-            c.alignment = Alignment(vertical="top", wrap_text=(col >= 7))
-        ws.row_dimensions[i].height = 40 if row_data[7] or row_data[8] else 20
+            c.alignment = Alignment(vertical="top", wrap_text=(col >= 9))
+        ws.row_dimensions[i].height = 40 if row_data[9] or row_data[10] else 20
 
-    # 列宽
-    widths = [14, 22, 20, 12, 18, 14, 36, 28, 55]
+    widths = [12, 24, 20, 14, 18, 12, 14, 12, 42, 30, 50]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -137,14 +191,16 @@ def create_sample():
     notes = [
         ["列名",                   "必填", "说明",                                        "示例"],
         ["region",                 "否",   "资源所在区域/地域",                           "cn-north-4"],
-        ["resource name",          "是",   "资源名称（唯一标识）",                        "ecs-web-01"],
+        ["resource name",          "是",   "资源名称（唯一标识）",                        "ecs-order-web-01"],
         ["resource id",            "否",   "资源实例 ID",                                 "ecs-11111111"],
-        ["resource_type",          "是",   "服务类型（ECS/ELB/RDS/DCS/OBS/CCE 等）",      "ECS"],
-        ["enterprise_project_id",  "否",   "企业项目 ID / MAC / 其他地址",                "ep-prod-001"],
-        ["资源分组",               "否",   "功能分组标签（如 K8s工作节点、反向代理）",     "Web应用层"],
-        ["下游服务",               "否",   "已确认下游服务，逗号分隔（值为 resource name）","rds-prod-master,dcs-redis-01"],
-        ["下游服务(推断)",         "否",   "推断的下游服务，逗号分隔（显示为虚线）",        "apig-prod-01"],
-        ["推断原因",               "否",   "推断依据（详细描述分析过程）",                 "配置文件中 DB_HOST 指向…"],
+        ["resource_type",          "是",   "服务类型（ECS/ELB/RDS/DCS/CCE_Deployment 等）", "ECS"],
+        ["enterprise_project_id",  "否",   "企业项目 ID",                                 "ep-prod-001"],
+        ["企业项目",               "否",   "企业项目名称（CCE_Deployment 聚合节点名）",     "生产项目"],
+        ["资源分组",               "否",   "功能分组标签（CCE_Deployment 触发聚合）",       "CCE_Deployment"],
+        ["所属业务",               "否",   "业务分组依据",                                 "订单业务"],
+        ["下游服务",               "否",   "已确认下游服务，逗号分隔（值为 resource name）", "rds-order-master,dcs-order-redis-01"],
+        ["下游服务(推断)",         "否",   "推断的下游服务，逗号分隔（显示为虚线）",        "apig-order-01"],
+        ["推断原因",               "否",   "推断依据（详细描述分析过程）",                  "配置文件中 DB_HOST 指向…"],
     ]
     h2fill = PatternFill("solid", fgColor="283593")
     for i, row_data in enumerate(notes, 1):
@@ -155,11 +211,11 @@ def create_sample():
             c.border = border
             c.alignment = Alignment(vertical="top", wrap_text=True)
         ws2.row_dimensions[i].height = 36
-    for col, w in zip("ABCD", [22, 6, 45, 32]):
+    for col, w in zip("ABCD", [22, 6, 55, 42]):
         ws2.column_dimensions[col].width = w
 
     wb.save("sample.xlsx")
-    print("已生成 sample.xlsx")
+    print(f"已生成 sample.xlsx（数据行数: {len(rows)}）")
     print("运行: py converter.py sample.xlsx")
 
 
