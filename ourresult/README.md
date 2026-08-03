@@ -32,7 +32,8 @@ py converter.py sample.xlsx
 | `resource name` | **是** | 资源唯一名称（作为节点标签和边的引用依据） | `ecs-web-01` |
 | `resource_type` | **是** | 服务类型（见下方支持列表） | `ECS` |
 | `resource id` | 否 | 资源实例 ID | `ecs-11111111` |
-| `enterprise_project_id` | 否 | 企业项目 ID / MAC / 其他标识 | `ep-prod-001` |
+| `企业项目` | 否 | 企业项目名称；CCE_Deployment 的框名优先取此字段 | `生产项目` |
+| `enterprise_project_id` | 否 | 企业项目 ID；企业项目名称为空时作为框名回退值 | `ep-prod-001` |
 | `region` | 否 | 资源所在区域；相同 region 的资源会被分组到同一容器内 | `cn-north-4` |
 | `资源分组` | 否 | 功能分组标签；相同分组的资源在 region 内聚合显示 | `K8s工作节点` |
 | `下游服务` | 否 | **已确认**的下游服务，逗号分隔，值为 `resource name` | `rds-prod,redis-01` |

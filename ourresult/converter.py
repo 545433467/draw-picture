@@ -468,7 +468,10 @@ COL_ALIASES = {
                      "类型", "service_type"],
     "资源ID":       ["resource id", "resource_id", "resourceid", "资源id",
                      "资源ID", "id", "服务id", "instance_id"],
-    "企业项目ID":   ["enterprise_project_id", "enterprise_project",
+    "企业项目":     ["企业项目", "enterprise project", "enterprise_project",
+                     "enterprise_project_name", "enterpriseprojectname",
+                     "ep_name", "企业项目名称"],
+    "企业项目ID":   ["enterprise_project_id", "enterpriseprojectid",
                      "企业项目id", "企业项目ID", "project_id"],
     "区域":         ["region", "区域", "地域", "availability_zone", "az"],
     "资源分组":     ["资源分组", "分组", "resource_group", "group",
@@ -593,6 +596,7 @@ def read_excel(filepath):
             "type":            get("服务类型", "default").lower().strip(),
             "resource_id":     get("资源ID"),
             "enterprise_id":   get("企业项目ID"),
+            "enterprise_project": get("企业项目"),
             "region":          get("区域"),
             "group":           get("资源分组"),
             "business":        get("所属业务"),
@@ -635,7 +639,9 @@ def build_graph(records):
         if not is_cce_deployment_resource(r):
             continue
         biz_text = (r["business"] or "").strip()
-        project_text = (r["enterprise_id"] or "").strip()
+        project_text = (
+            (r.get("enterprise_project") or r["enterprise_id"] or "").strip()
+        )
         if not biz_text or not project_text:
             continue
         svc_key = get_service_key(r["name"], r["type"])
@@ -675,7 +681,9 @@ def build_graph(records):
         # resource_name 前 3 段（前缀）与企业项目（enterprise_id）逐级细分。
         is_cce = is_cce_deployment_resource(r)
         cce_prefix = extract_cce_business_prefix(r["name"]) if is_cce else ""
-        enterprise_project = (r["enterprise_id"] or "").strip()
+        enterprise_project = (
+            (r.get("enterprise_project") or r["enterprise_id"] or "").strip()
+        )
         project_label = enterprise_project or "(未设置企业项目)"
 
         # 未填写所属业务时，退而求其次并入“相同企业项目 + 相同前缀”所在的
@@ -730,6 +738,7 @@ def build_graph(records):
             "business_key":  biz_key,
             "source_business": (r["business"] or "").strip(),
             "enterprise_project": enterprise_project,
+            "enterprise_project_name": (r.get("enterprise_project") or "").strip(),
             "cce_business_prefix": cce_prefix,
             "is_cce_deployment": 1 if is_cce else 0,
             "business_fallback": 1 if fallback_biz_key else 0,
@@ -1260,7 +1269,9 @@ def build_graph(records):
 
         if project_key is not None:
             prj_parent = sc_id if sc_id else layer_id
-            prj_id = f"prj_{prj_parent}_{safe_id(project_key)}"
+            # 企业项目名可能含中文等非 ASCII 字符，safe_id 会使其互相撞 ID，
+            # 因此改用唯一的分组序号生成容器 ID。
+            prj_id = f"prj_{group_meta['group_index']}"
             project_containers.append({"group": "nodes", "data": {
                 "id":              prj_id,
                 "name":            group_meta["project_label"],
@@ -2232,7 +2243,8 @@ function showNodeDetail(d, bg) {{
     ['所属层',   d.layer_name || '-'],
     ['资源类型', (d.type||'').toUpperCase()],
     ['资源ID',   d.resource_id  || '-'],
-    ['企业项目', d.enterprise_id|| '-'],
+    ['企业项目', d.enterprise_project || d.enterprise_id || '-'],
+    ['企业项目ID', d.enterprise_id || '-'],
     ['区域',     d.region       || '-'],
     ['资源分组', d.group_label  || '-'],
     ['规格',     d.spec         || '-'],

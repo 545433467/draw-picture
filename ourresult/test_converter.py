@@ -19,12 +19,13 @@ from converter import (
 
 def make_record(name, business="业务A", service_type="cce_deploym", targets="",
                 inferred_targets="", reason="", source="", enterprise_id="",
-                group=""):
+                enterprise_project="", group=""):
     return {
         "name": name,
         "type": service_type,
         "resource_id": f"id-{name}",
         "enterprise_id": enterprise_id,
+        "enterprise_project": enterprise_project,
         "region": "cn-test-1",
         "group": group,
         "business": business,
@@ -761,6 +762,58 @@ class BuildGraphAggregationTests(unittest.TestCase):
             converter.extract_cce_business_prefix("bj-prod-app-deploy-01"),
             "bj-prod-app",
         )
+
+    def test_cce_project_box_uses_enterprise_project_name_field(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-id-1",
+                        enterprise_project="生产项目"),
+            make_record("bj-prod-app-deploy-2", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-id-1",
+                        enterprise_project="生产项目"),
+            make_record("bj-prod-app-deploy-3", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-id-2",
+                        enterprise_project="测试项目"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        projects = [node for node in nodes if node.get("type") == "__project__"]
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
+
+        # 框名取“企业项目”字段，而非 enterprise_project_id
+        self.assertEqual({node["name"] for node in projects},
+                         {"生产项目", "测试项目"})
+        # 中文项目名不会因 safe_id 归一化而撞 ID，两个框必须互相独立
+        self.assertEqual(len({node["id"] for node in projects}), 2)
+        self.assertEqual(projects[0]["resource_total"], 2)
+        self.assertEqual(projects[1]["resource_total"], 1)
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-1"]["enterprise_project"],
+                         "生产项目")
+        self.assertEqual(
+            leaf_by_name["bj-prod-app-deploy-1"]["enterprise_project_name"],
+            "生产项目",
+        )
+
+    def test_read_excel_detects_enterprise_project_name_column(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["服务名称", "服务类型", "企业项目", "企业项目ID"])
+        ws.append(["cce-1", "cce", "生产项目", "ep-id-1"])
+        ws.append(["cce-2", "cce", "测试项目", "ep-id-2"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "ep-name.xlsx")
+            wb.save(path)
+            records = read_excel(path)
+
+        self.assertEqual([record["enterprise_project"] for record in records],
+                         ["生产项目", "测试项目"])
+        self.assertEqual([record["enterprise_id"] for record in records],
+                         ["ep-id-1", "ep-id-2"])
 
     def test_non_cce_deployment_resources_keep_business_column_grouping(self):
         records = [
