@@ -283,6 +283,11 @@ NAME_PATTERNS = [
 
 # CCE_Deployment resource-grouping helpers
 
+# CCE_Deployment 业务前缀取 resource_name 的前 N 段（按 - 分隔）。
+# 一般取前 3 段；如需按前 4 段分组，将本常量改为 4 即可。
+CCE_BUSINESS_PREFIX_SEGMENTS = 3
+
+
 def _compact_lower(value):
     """Strip whitespace, underscores and dashes, then casefold."""
     return re.sub(r"[\s_\-]+", "", str(value or "")).casefold()
@@ -298,18 +303,23 @@ def is_cce_deployment_resource(record):
 
 
 def extract_cce_business_prefix(name):
-    """Return the first three dash-separated segments as the CCE business key."""
+    """Return the first CCE_BUSINESS_PREFIX_SEGMENTS dash-separated segments."""
     parts = [part.strip() for part in str(name or "").split("-") if part.strip()]
-    return "-".join(parts[:3]) if len(parts) >= 3 else ""
+    return ("-".join(parts[:CCE_BUSINESS_PREFIX_SEGMENTS])
+            if len(parts) >= CCE_BUSINESS_PREFIX_SEGMENTS else "")
 
 
 def split_group_key(group_key):
-    """Unpack a 3-tuple (plain) or 4-tuple (CCE with enterprise project) key."""
+    """Unpack a 3-tuple (plain), 4-tuple (CCE project only) or 5-tuple
+    (CCE prefix + enterprise project) grouping key."""
+    if len(group_key) == 5:
+        biz_key, layer_key, svc_key, prefix_key, project_key = group_key
+        return biz_key, layer_key, svc_key, prefix_key, project_key
     if len(group_key) == 4:
         biz_key, layer_key, svc_key, project_key = group_key
-        return biz_key, layer_key, svc_key, project_key
+        return biz_key, layer_key, svc_key, None, project_key
     biz_key, layer_key, svc_key = group_key
-    return biz_key, layer_key, svc_key, None
+    return biz_key, layer_key, svc_key, None, None
 
 
 def get_service_key(name, type_field):
@@ -618,6 +628,37 @@ def build_graph(records):
 
     entries = []
 
+    # 预扫描：收集“已填写所属业务”的 CCE_Deployment 节点所归属的企业项目，
+    # 供未填写所属业务的 CCE 节点按相同企业项目回退并入对应业务分组。
+    project_biz_candidates = defaultdict(list)  # 企业项目(casefold) -> [候选业务]
+    for r in records:
+        if not is_cce_deployment_resource(r):
+            continue
+        biz_text = (r["business"] or "").strip()
+        project_text = (r["enterprise_id"] or "").strip()
+        if not biz_text or not project_text:
+            continue
+        svc_key = get_service_key(r["name"], r["type"])
+        normalized_biz = canonical_business_name(biz_text)
+        biz_key = f"__business__:{normalized_biz or biz_text.casefold()}"
+        prefix = extract_cce_business_prefix(r["name"])
+        candidates = project_biz_candidates[project_text.casefold()]
+        cand = next(
+            (item for item in candidates if item["biz_key"] == biz_key),
+            None,
+        )
+        if cand is None:
+            cand = {
+                "biz_key": biz_key,
+                "biz_label": biz_text,
+                "prefix_keys": set(),
+                "count": 0,
+            }
+            candidates.append(cand)
+        if prefix:
+            cand["prefix_keys"].add(prefix.casefold())
+        cand["count"] += 1
+
     def make_entry(r, index, is_external=False, forced_service_key=None):
         nid = f"n_{safe_id(r['name'])}_{index}"
         stype = r["type"] or "default"
@@ -630,25 +671,44 @@ def build_graph(records):
             svc_key, SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
         )
 
-        # CCE_Deployment 资源：业务分组优先取 resource_name 前 3 段，
-        # 组内再按企业项目（enterprise_id）进一步细分。
+        # CCE_Deployment 资源：业务框仍按“所属业务”字段划分，组内再按
+        # resource_name 前 3 段（前缀）与企业项目（enterprise_id）逐级细分。
         is_cce = is_cce_deployment_resource(r)
         cce_prefix = extract_cce_business_prefix(r["name"]) if is_cce else ""
-        if is_cce and cce_prefix:
-            source_biz = cce_prefix
         enterprise_project = (r["enterprise_id"] or "").strip()
         project_label = enterprise_project or "(未设置企业项目)"
 
+        # 未填写所属业务时，退而求其次并入“相同企业项目 + 相同前缀”所在的
+        # 业务分组；多个候选时按该业务内匹配的 CCE 资源数取最多者。
+        fallback_biz_key = ""
+        fallback_biz_label = ""
+        if is_cce and not source_biz and enterprise_project and cce_prefix:
+            prefix_key_hint = cce_prefix.casefold()
+            candidates = [
+                item for item in project_biz_candidates.get(
+                    enterprise_project.casefold(), []
+                )
+                if prefix_key_hint in item["prefix_keys"]
+            ]
+            if candidates:
+                best = max(candidates, key=lambda item: item["count"])
+                fallback_biz_key = best["biz_key"]
+                fallback_biz_label = best["biz_label"]
+                source_biz = fallback_biz_label
+
         is_virtual_business = not bool(source_biz)
-        if source_biz:
+        if fallback_biz_key:
+            biz_key = fallback_biz_key
+        elif source_biz:
             normalized_biz = canonical_business_name(source_biz)
             biz_key = f"__business__:{normalized_biz or source_biz.casefold()}"
         else:
             biz_key = f"__service_business__:{svc_key}"
         biz_label = source_biz or get_service_display_name(svc_key)
         if is_cce and cce_prefix:
+            prefix_key = cce_prefix.casefold()
             project_key = enterprise_project.casefold() or "__none__"
-            group_key = (biz_key, layer_key, svc_key, project_key)
+            group_key = (biz_key, layer_key, svc_key, prefix_key, project_key)
         else:
             group_key = (biz_key, layer_key, svc_key)
 
@@ -673,6 +733,7 @@ def build_graph(records):
             "enterprise_project": enterprise_project,
             "cce_business_prefix": cce_prefix,
             "is_cce_deployment": 1 if is_cce else 0,
+            "business_fallback": 1 if fallback_biz_key else 0,
             "is_virtual_business": 1 if is_virtual_business else 0,
             "reason":        r["reason"],
             "bg_color":      bg,
@@ -968,7 +1029,15 @@ def build_graph(records):
         visible_entries = group_entries[:MAX_VISIBLE_SERVICE_NODES]
         hidden_entries = group_entries[MAX_VISIBLE_SERVICE_NODES:]
         visible_indexes.update(entry["index"] for entry in visible_entries)
-        biz_key, layer_key, svc_key, project_key = split_group_key(group_key)
+        biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
+            group_key
+        )
+        prefix_label = ""
+        if prefix_key is not None:
+            prefix_label = (
+                group_entries[0]["data"].get("cce_business_prefix", "")
+                or prefix_key
+            )
         project_label = ""
         if project_key is not None:
             project_label = (
@@ -982,6 +1051,8 @@ def build_graph(records):
             "first_id": visible_entries[0]["data"]["id"],
             "summary_id": "",
             "group_index": group_index,
+            "prefix_key": prefix_key,
+            "prefix_label": prefix_label,
             "project_key": project_key,
             "project_label": project_label,
         }
@@ -1012,7 +1083,9 @@ def build_graph(records):
         hidden_count = len(info["hidden"])
         if not hidden_count:
             continue
-        biz_key, layer_key, svc_key, project_key = split_group_key(group_key)
+        biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
+            group_key
+        )
         sample_data = info["entries"][0]["data"]
         summary_id = f"summary_{info['group_index']}"
         info["summary_id"] = summary_id
@@ -1039,6 +1112,7 @@ def build_graph(records):
             "resource_id":     "",
             "enterprise_id":   info.get("project_label", ""),
             "enterprise_project": info.get("project_label", ""),
+            "cce_business_prefix": info.get("prefix_label", ""),
             "region":          "",
             "group_label":     "",
             "reason":          "",
@@ -1092,11 +1166,22 @@ def build_graph(records):
     layer_containers = []
     service_containers = []
     node_by_id = {node["data"]["id"]: node for node in nodes}
+
+    # CCE_Deployment 前缀分组所在的业务：即使未填写所属业务（虚拟业务），
+    # 也要为其建立计算层容器，确保 CCE 分组落在“第三层：计算…”之内。
+    cce_prefix_bizs = {
+        split_group_key(group_key)[0]
+        for group_key in service_groups
+        if split_group_key(group_key)[3] is not None
+    }
+
     layers_by_business = defaultdict(set)
     layer_totals = defaultdict(int)
     for group_key, info in service_groups.items():
-        biz_key, layer_key, svc_key, project_key = split_group_key(group_key)
-        if business_meta[biz_key]["is_virtual"]:
+        biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
+            group_key
+        )
+        if business_meta[biz_key]["is_virtual"] and biz_key not in cce_prefix_bizs:
             continue
         layers_by_business[biz_key].add(layer_key)
         layer_totals[(biz_key, layer_key)] += len(info)
@@ -1123,61 +1208,103 @@ def build_graph(records):
                 "shape":           "roundrectangle",
             }})
 
-    # 服务容器按 (业务, 层, 服务) 去重创建；CCE_Deployment 组再按企业项目
-    # 细分为 __project__ 子容器，普通资源保持原层级。
+    # 服务容器按 (业务, 层, 服务) 去重创建；CCE_Deployment 组先按
+    # resource_name 前缀细分为 __cce_group__ 容器，再按企业项目细分为
+    # __project__ 子容器；普通资源保持原层级。
     service_agg = {}
+    cce_group_agg = {}
     for group_key, info in service_groups.items():
-        biz_key, layer_key, svc_key, project_key = split_group_key(group_key)
-        if business_meta[biz_key]["is_virtual"]:
-            continue
+        biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
+            group_key
+        )
         sc_key = (biz_key, layer_key, svc_key)
-        agg = service_agg.setdefault(sc_key, {
-            "resource_total": 0, "visible_count": 0, "collapsed_count": 0,
-        })
-        agg["resource_total"] += len(info)
-        agg["visible_count"] += len(group_info[group_key]["visible"])
-        agg["collapsed_count"] += len(group_info[group_key]["hidden"])
+        if not business_meta[biz_key]["is_virtual"]:
+            agg = service_agg.setdefault(sc_key, {
+                "resource_total": 0, "visible_count": 0, "collapsed_count": 0,
+            })
+            agg["resource_total"] += len(info)
+            agg["visible_count"] += len(group_info[group_key]["visible"])
+            agg["collapsed_count"] += len(group_info[group_key]["hidden"])
+        if prefix_key is not None:
+            pg_key = sc_key + (prefix_key,)
+            pagg = cce_group_agg.setdefault(pg_key, {
+                "resource_total": 0, "visible_count": 0, "collapsed_count": 0,
+            })
+            pagg["resource_total"] += len(info)
+            pagg["visible_count"] += len(group_info[group_key]["visible"])
+            pagg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
     service_container_ids = {}
+    cce_group_container_ids = {}
+    cce_group_containers = []
     project_containers = []
     for group_key, info in service_groups.items():
-        biz_key, layer_key, svc_key, project_key = split_group_key(group_key)
+        biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
+            group_key
+        )
         biz_id = business_map[biz_key]
         group_meta = group_info[group_key]
         rendered_ids = {entry["data"]["id"] for entry in group_meta["visible"]}
         if group_meta["summary_id"]:
             rendered_ids.add(group_meta["summary_id"])
 
-        # 虚拟业务框本身已经代表服务类型，不再重复嵌套同名服务框。
-        if business_meta[biz_key]["is_virtual"]:
+        is_virtual = business_meta[biz_key]["is_virtual"]
+        if is_virtual and biz_key not in cce_prefix_bizs:
             continue
 
         layer_id = layer_map[(biz_key, layer_key)]
         sc_key = (biz_key, layer_key, svc_key)
-        if sc_key not in service_container_ids:
-            sc_id = f"sc_{biz_id}_{safe_id(layer_key)}_{safe_id(svc_key)}"
-            service_container_ids[sc_key] = sc_id
-            agg = service_agg[sc_key]
-            service_containers.append({"group": "nodes", "data": {
-                "id":              sc_id,
-                "name":            get_service_display_name(svc_key),
-                "type":            "__service__",
-                "service_key":     svc_key,
-                "layer_key":       layer_key,
-                "layer_name":      get_topology_layer_name(layer_key),
-                "resource_total":  agg["resource_total"],
-                "visible_count":   agg["visible_count"],
-                "collapsed_count": agg["collapsed_count"],
-                "is_container":    1,
-                "parent":          layer_id,
-                "bg_color":        "#F2F3F4",
-                "border_color":    "#7F8C8D",
-                "shape":           "roundrectangle",
-            }})
-        sc_id = service_container_ids[sc_key]
+        sc_id = None
+        # 虚拟业务框本身已经代表服务类型，不再重复嵌套同名服务框。
+        if not is_virtual:
+            if sc_key not in service_container_ids:
+                sc_id = f"sc_{biz_id}_{safe_id(layer_key)}_{safe_id(svc_key)}"
+                service_container_ids[sc_key] = sc_id
+                agg = service_agg[sc_key]
+                service_containers.append({"group": "nodes", "data": {
+                    "id":              sc_id,
+                    "name":            get_service_display_name(svc_key),
+                    "type":            "__service__",
+                    "service_key":     svc_key,
+                    "layer_key":       layer_key,
+                    "layer_name":      get_topology_layer_name(layer_key),
+                    "resource_total":  agg["resource_total"],
+                    "visible_count":   agg["visible_count"],
+                    "collapsed_count": agg["collapsed_count"],
+                    "is_container":    1,
+                    "parent":          layer_id,
+                    "bg_color":        "#F2F3F4",
+                    "border_color":    "#7F8C8D",
+                    "shape":           "roundrectangle",
+                }})
+            sc_id = service_container_ids[sc_key]
 
-        if project_key is not None:
-            prj_id = f"prj_{sc_id}_{safe_id(project_key)}"
+        if prefix_key is not None:
+            pg_key = sc_key + (prefix_key,)
+            if pg_key not in cce_group_container_ids:
+                cgrp_parent = sc_id if sc_id else layer_id
+                cgrp_id = f"cgrp_{cgrp_parent}_{safe_id(prefix_key)}"
+                cce_group_container_ids[pg_key] = cgrp_id
+                pagg = cce_group_agg[pg_key]
+                cce_group_containers.append({"group": "nodes", "data": {
+                    "id":              cgrp_id,
+                    "name":            group_meta["prefix_label"],
+                    "type":            "__cce_group__",
+                    "service_key":     svc_key,
+                    "layer_key":       layer_key,
+                    "layer_name":      get_topology_layer_name(layer_key),
+                    "resource_total":  pagg["resource_total"],
+                    "visible_count":   pagg["visible_count"],
+                    "collapsed_count": pagg["collapsed_count"],
+                    "is_container":    1,
+                    "parent":          cgrp_parent,
+                    "bg_color":        "#FEF9E7",
+                    "border_color":    "#F1C40F",
+                    "shape":           "roundrectangle",
+                }})
+            cgrp_id = cce_group_container_ids[pg_key]
+
+            prj_id = f"prj_{cgrp_id}_{safe_id(project_key)}"
             project_containers.append({"group": "nodes", "data": {
                 "id":              prj_id,
                 "name":            group_meta["project_label"],
@@ -1189,7 +1316,7 @@ def build_graph(records):
                 "visible_count":   len(group_meta["visible"]),
                 "collapsed_count": len(group_meta["hidden"]),
                 "is_container":    1,
-                "parent":          sc_id,
+                "parent":          cgrp_id,
                 "bg_color":        "#EAF7F5",
                 "border_color":    "#48C9B0",
                 "shape":           "roundrectangle",
@@ -1199,9 +1326,11 @@ def build_graph(records):
                 if node:
                     node["data"]["parent"] = prj_id
                     node["data"]["project_container"] = prj_id
-                    node["data"]["service_container"] = sc_id
+                    node["data"]["cce_group_container"] = cgrp_id
+                    if sc_id:
+                        node["data"]["service_container"] = sc_id
                     node["data"]["layer_container"] = layer_id
-        else:
+        elif sc_id is not None:
             for node_id in rendered_ids:
                 node = node_by_id.get(node_id)
                 if node:
@@ -1210,7 +1339,7 @@ def build_graph(records):
                     node["data"]["layer_container"] = layer_id
 
     nodes = (biz_containers + layer_containers + service_containers
-             + project_containers + nodes)
+             + cce_group_containers + project_containers + nodes)
 
     # ── 3. 创建边 ─────────────────────────────────────────────────────────
 
@@ -1748,6 +1877,26 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "shape": "roundrectangle",
             }
         },
+        # CCE 业务前缀分组容器（resource_name 前 3 段）
+        {
+            "selector": "node[type = '__cce_group__']",
+            "style": {
+                "border-color": "#F1C40F",
+                "border-width": 1.5,
+                "border-style": "dashed",
+                "background-color": "#FEF9E7",
+                "background-opacity": 0.5,
+                "font-size": 11,
+                "font-weight": "bold",
+                "color": "#7D6608",
+                "text-valign": "top",
+                "text-background-color": "#fff",
+                "text-background-opacity": 0.9,
+                "text-background-padding": "3px",
+                "padding": "18px",
+                "shape": "roundrectangle",
+            }
+        },
         # 聚合资源固定显示两行：服务统称 + 截短后的 resource_name
         {
             "selector": "node[is_grouped_resource = 1][is_summary = 0]",
@@ -2091,7 +2240,7 @@ setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
 cy.on('tap', 'node', function(evt) {{
   var d  = evt.target.data();
   var bg = d.bg_color || '#888';
-  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__' || d.type === '__project__') {{
+  if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__' || d.type === '__cce_group__' || d.type === '__project__') {{
     showContainerDetail(d);
   }} else if (d.is_summary === 1) {{
     showSummaryDetail(d);
@@ -2176,7 +2325,7 @@ function showNodeDetail(d, bg) {{
   var nbrs  = src.neighborhood().nodes().filter(function(n) {{
     var t = n.data('type');
     return t !== '__region__' && t !== '__group__' && t !== '__business__' &&
-           t !== '__layer__' && t !== '__service__' && t !== '__project__';
+           t !== '__layer__' && t !== '__service__' && t !== '__cce_group__' && t !== '__project__';
   }});
   if (nbrs.length > 0) {{
     html += '<div class="d-row"><div class="d-label">相邻节点</div><div class="d-value">';
@@ -2236,11 +2385,13 @@ function showContainerDetail(d) {{
             : d.type === '__business__' ? '所属业务'
             : d.type === '__layer__' ? '业务层'
             : d.type === '__service__' ? '服务类型'
+            : d.type === '__cce_group__' ? 'CCE业务分组'
             : d.type === '__project__' ? '企业项目'
             : '资源分组';
   var tagColor = d.type === '__business__' ? '#1ABC9C'
                : d.type === '__layer__' ? '#5D6D7E'
                : d.type === '__service__'  ? '#7F8C8D'
+               : d.type === '__cce_group__' ? '#B7950B'
                : d.type === '__project__'  ? '#117864'
                : '#2E86C1';
   var html = '<div class="d-row"><div class="d-label">'+label+'</div>' +
@@ -2330,16 +2481,16 @@ function toggleBusinessView() {{
     // 先摘除叶节点与各级子容器的父子关系
     cy.nodes().forEach(function(n) {{
       var p = n.data('parent');
-      if (p && (p.indexOf('biz_') === 0 || p.indexOf('layer_') === 0 || p.indexOf('sc_') === 0 || p.indexOf('prj_') === 0)) {{
+      if (p && (p.indexOf('biz_') === 0 || p.indexOf('layer_') === 0 || p.indexOf('sc_') === 0 || p.indexOf('cgrp_') === 0 || p.indexOf('prj_') === 0)) {{
         _origParents[n.id()] = p;
         n.move({{ parent: null }});
       }}
     }});
-    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"],[type = "__project__"]').style('display', 'none');
+    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"],[type = "__cce_group__"],[type = "__project__"]').style('display', 'none');
     btn.innerHTML = '&#127968; 业务分组:关';
     btn.style.background = 'rgba(255,255,255,.15)';
   }} else {{
-    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"],[type = "__project__"]').style('display', 'element');
+    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"],[type = "__cce_group__"],[type = "__project__"]').style('display', 'element');
     Object.keys(_origParents).forEach(function(nid) {{
       cy.getElementById(nid).move({{ parent: _origParents[nid] }});
     }});

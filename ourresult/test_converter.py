@@ -576,21 +576,23 @@ class BuildGraphAggregationTests(unittest.TestCase):
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
         businesses = [node for node in nodes if node.get("type") == "__business__"]
+        cce_groups = [node for node in nodes if node.get("type") == "__cce_group__"]
         leaf_by_name = {
             node["name"]: node for node in nodes
             if not node.get("is_container") and not node.get("is_summary")
         }
 
-        self.assertEqual(
-            {node["name"] for node in businesses},
-            {"bj-prod-app", "bj4-prod-app"},
-        )
+        self.assertEqual([node["name"] for node in businesses], ["业务A"])
+        self.assertEqual({node["name"] for node in cce_groups},
+                         {"bj-prod-app", "bj4-prod-app"})
         self.assertEqual(leaf_by_name["bj-prod-app-deploy-1"]["business"],
-                         "bj-prod-app")
-        self.assertEqual(leaf_by_name["bj-prod-app-deploy-1"]["source_business"],
                          "业务A")
+        self.assertEqual(
+            leaf_by_name["bj-prod-app-deploy-1"]["cce_business_prefix"],
+            "bj-prod-app",
+        )
         self.assertEqual(leaf_by_name["bj4-prod-app-deploy-1"]["business"],
-                         "bj4-prod-app")
+                         "业务A")
 
     def test_cce_deployment_resources_split_by_enterprise_project(self):
         records = [
@@ -610,6 +612,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         nodes = element_data(elements, "nodes")
         node_by_id = {node["id"]: node for node in nodes}
         projects = [node for node in nodes if node.get("type") == "__project__"]
+        cce_groups = [node for node in nodes if node.get("type") == "__cce_group__"]
         leaves = [
             node for node in nodes
             if not node.get("is_container") and not node.get("is_summary")
@@ -619,28 +622,34 @@ class BuildGraphAggregationTests(unittest.TestCase):
             {node["name"] for node in projects},
             {"ep-A", "ep-B", "(未设置企业项目)"},
         )
+        self.assertEqual([node["name"] for node in cce_groups], ["bj-prod-app"])
         for leaf in leaves:
             parent = node_by_id[leaf["parent"]]
             self.assertEqual(parent["type"], "__project__")
             self.assertEqual(parent["name"], leaf["enterprise_project"]
                              or "(未设置企业项目)")
-            self.assertEqual(parent["parent"],
-                             node_by_id[leaf["service_container"]]["id"])
+            cce_group = node_by_id[parent["parent"]]
+            self.assertEqual(cce_group["type"], "__cce_group__")
+            self.assertEqual(cce_group["name"], leaf["cce_business_prefix"])
+            service = node_by_id[cce_group["parent"]]
+            self.assertEqual(service["type"], "__service__")
+            self.assertEqual(service["id"], leaf["service_container"])
 
     def test_cce_deployment_summarizes_per_enterprise_project(self):
         records = []
         for index in range(8):
             records.append(make_record(
-                f"bj-prod-app-deploy-a-{index}", service_type="cce",
+                f"bj-prod-app-deploy-{index}", service_type="cce",
                 group="CCE_Deployment", enterprise_id="ep-A",
             ))
             records.append(make_record(
-                f"bj-prod-app-deploy-b-{index}", service_type="cce",
+                f"bj-prod-app-deploy-{index}", service_type="cce",
                 group="CCE_Deployment", enterprise_id="ep-B",
             ))
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
+        cce_groups = [node for node in nodes if node.get("type") == "__cce_group__"]
         projects = {
             node["name"]: node for node in nodes
             if node.get("type") == "__project__"
@@ -649,6 +658,10 @@ class BuildGraphAggregationTests(unittest.TestCase):
         project_ids = {node["id"] for node in nodes
                        if node.get("type") == "__project__"}
 
+        self.assertEqual(len(cce_groups), 1)
+        self.assertEqual(cce_groups[0]["resource_total"], 16)
+        self.assertEqual(cce_groups[0]["visible_count"], 10)
+        self.assertEqual(cce_groups[0]["collapsed_count"], 6)
         self.assertEqual(set(projects), {"ep-A", "ep-B"})
         self.assertEqual(projects["ep-A"]["visible_count"],
                          MAX_VISIBLE_SERVICE_NODES)
@@ -656,6 +669,103 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(len(summaries), 2)
         self.assertTrue(all(summary["parent"] in project_ids
                             for summary in summaries))
+
+    def test_cce_deployment_without_business_stays_in_compute_layer(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", business="", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj4-prod-app-deploy-1", business="", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        node_by_id = {node["id"]: node for node in nodes}
+        business = next(node for node in nodes if node.get("type") == "__business__")
+        layers = [node for node in nodes if node.get("type") == "__layer__"]
+        cce_groups = [node for node in nodes if node.get("type") == "__cce_group__"]
+
+        self.assertEqual(business["is_virtual_business"], 1)
+        self.assertTrue(layers)
+        self.assertEqual({node["layer_key"] for node in layers}, {"compute_app"})
+        self.assertTrue(all(node_by_id[node["parent"]]["type"] == "__layer__"
+                            for node in cce_groups))
+
+    def test_cce_deployment_without_business_falls_back_to_project_business(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj-prod-app-deploy-2", business="", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("gz-prod-app-deploy-1", business="", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-Z"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        businesses = [node for node in nodes if node.get("type") == "__business__"]
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
+
+        self.assertEqual({node["name"] for node in businesses}, {"业务A", "CCE"})
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-2"]["business"], "业务A")
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-2"]["business_fallback"],
+                         1)
+        self.assertEqual(leaf_by_name["gz-prod-app-deploy-1"]["business"], "CCE")
+        self.assertEqual(leaf_by_name["gz-prod-app-deploy-1"]["business_fallback"],
+                         0)
+
+    def test_cce_fallback_requires_same_prefix(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", business="业务A", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj4-prod-app-deploy-1", business="", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
+
+        # 企业项目相同但前缀不同（bj4-prod-app ≠ bj-prod-app），不合并。
+        self.assertEqual(leaf_by_name["bj4-prod-app-deploy-1"]["business"], "CCE")
+        self.assertEqual(leaf_by_name["bj4-prod-app-deploy-1"]["business_fallback"],
+                         0)
+
+    def test_cce_fallback_prefers_business_with_more_same_prefix_nodes(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", business="业务A", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj-prod-app-deploy-2", business="业务A", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj-prod-app-web-1", business="业务B", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("bj-prod-app-deploy-3", business="", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
+
+        # 业务A 有 2 个同前缀（bj-prod-app）节点，业务B 只有 1 个 → 并入业务A。
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-3"]["business"], "业务A")
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-3"]["business_fallback"],
+                         1)
+
+    def test_cce_prefix_uses_three_segments_by_default(self):
+        self.assertEqual(
+            converter.extract_cce_business_prefix("bj-prod-app-deploy-01"),
+            "bj-prod-app",
+        )
 
     def test_non_cce_deployment_resources_keep_business_column_grouping(self):
         records = [
