@@ -583,8 +583,8 @@ class BuildGraphAggregationTests(unittest.TestCase):
         }
 
         self.assertEqual([node["name"] for node in businesses], ["业务A"])
-        self.assertEqual({node["name"] for node in cce_groups},
-                         {"bj-prod-app", "bj4-prod-app"})
+        # resource_name 前缀不再渲染为独立框层级
+        self.assertEqual(cce_groups, [])
         self.assertEqual(leaf_by_name["bj-prod-app-deploy-1"]["business"],
                          "业务A")
         self.assertEqual(
@@ -622,16 +622,14 @@ class BuildGraphAggregationTests(unittest.TestCase):
             {node["name"] for node in projects},
             {"ep-A", "ep-B", "(未设置企业项目)"},
         )
-        self.assertEqual([node["name"] for node in cce_groups], ["bj-prod-app"])
+        self.assertEqual(cce_groups, [])
         for leaf in leaves:
             parent = node_by_id[leaf["parent"]]
             self.assertEqual(parent["type"], "__project__")
             self.assertEqual(parent["name"], leaf["enterprise_project"]
                              or "(未设置企业项目)")
-            cce_group = node_by_id[parent["parent"]]
-            self.assertEqual(cce_group["type"], "__cce_group__")
-            self.assertEqual(cce_group["name"], leaf["cce_business_prefix"])
-            service = node_by_id[cce_group["parent"]]
+            # 企业项目框直接挂在服务框下，不再嵌套前缀框
+            service = node_by_id[parent["parent"]]
             self.assertEqual(service["type"], "__service__")
             self.assertEqual(service["id"], leaf["service_container"])
 
@@ -658,10 +656,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         project_ids = {node["id"] for node in nodes
                        if node.get("type") == "__project__"}
 
-        self.assertEqual(len(cce_groups), 1)
-        self.assertEqual(cce_groups[0]["resource_total"], 16)
-        self.assertEqual(cce_groups[0]["visible_count"], 10)
-        self.assertEqual(cce_groups[0]["collapsed_count"], 6)
+        self.assertEqual(cce_groups, [])
         self.assertEqual(set(projects), {"ep-A", "ep-B"})
         self.assertEqual(projects["ep-A"]["visible_count"],
                          MAX_VISIBLE_SERVICE_NODES)
@@ -683,13 +678,13 @@ class BuildGraphAggregationTests(unittest.TestCase):
         node_by_id = {node["id"]: node for node in nodes}
         business = next(node for node in nodes if node.get("type") == "__business__")
         layers = [node for node in nodes if node.get("type") == "__layer__"]
-        cce_groups = [node for node in nodes if node.get("type") == "__cce_group__"]
+        projects = [node for node in nodes if node.get("type") == "__project__"]
 
         self.assertEqual(business["is_virtual_business"], 1)
         self.assertTrue(layers)
         self.assertEqual({node["layer_key"] for node in layers}, {"compute_app"})
         self.assertTrue(all(node_by_id[node["parent"]]["type"] == "__layer__"
-                            for node in cce_groups))
+                            for node in projects))
 
     def test_cce_deployment_without_business_falls_back_to_project_business(self):
         records = [
