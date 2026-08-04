@@ -267,6 +267,42 @@ class BuildGraphAggregationTests(unittest.TestCase):
         ] + [layers[layer_edges[-1]["target"]]["layer_key"]]
         self.assertEqual(chained, order)
 
+    def test_resource_group_subcontainers_separate_mixed_groups(self):
+        records = [
+            make_record("cce-1", service_type="cce", group="CCE_Deployment"),
+            make_record("cce-2", service_type="cce", group="CCE_Deployment"),
+            make_record("cce-3", service_type="cce", group="K8s集群"),
+            make_record("cce-4", service_type="cce", group=""),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        node_by_id = {node["id"]: node for node in nodes}
+        group_boxes = [node for node in nodes if node.get("type") == "__group__"]
+
+        # 同一服务组内有 3 个不同资源分组值 → 生成 3 个次级框，框名为资源分组
+        self.assertEqual({node["name"] for node in group_boxes},
+                         {"CCE_Deployment", "K8s集群", "(未设置资源分组)"})
+        cce1 = next(node for node in nodes if node.get("name") == "cce-1")
+        box = node_by_id[cce1["parent"]]
+        self.assertEqual(box["type"], "__group__")
+        self.assertEqual(box["name"], "CCE_Deployment")
+        self.assertEqual(box["parent"], cce1["service_container"])
+        self.assertEqual(box["resource_total"], 2)
+
+    def test_single_resource_group_value_keeps_flat_layout(self):
+        records = [
+            make_record("cce-1", service_type="cce", group="CCE_Deployment"),
+            make_record("cce-2", service_type="cce", group="CCE_Deployment"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+
+        self.assertFalse(any(node.get("type") == "__group__" for node in nodes))
+        cce1 = next(node for node in nodes if node.get("name") == "cce-1")
+        self.assertEqual(cce1["parent"], cce1["service_container"])
+
     def test_icon_style_uses_fixed_dimensions(self):
         style = _make_cytoscape_style({"ecs": "data:image/png;base64,abc"})
         icon_style = next(

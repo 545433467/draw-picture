@@ -1279,6 +1279,8 @@ def build_graph(records):
             agg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
     service_container_ids = {}
+    group_containers = []
+    group_container_counter = [0]
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
@@ -1321,14 +1323,73 @@ def build_graph(records):
             sc_id = service_container_ids[sc_key]
 
         if sc_id is not None:
-            for node_id in rendered_ids:
-                node = node_by_id.get(node_id)
-                if node:
-                    node["data"]["parent"] = sc_id
-                    node["data"]["service_container"] = sc_id
-                    node["data"]["layer_container"] = layer_id
+            # 摘要节点始终直接挂在服务框下。
+            summary_id = group_meta["summary_id"]
+            if summary_id:
+                summary_node = node_by_id.get(summary_id)
+                if summary_node:
+                    summary_node["data"]["parent"] = sc_id
+                    summary_node["data"]["service_container"] = sc_id
+                    summary_node["data"]["layer_container"] = layer_id
 
-    nodes = biz_containers + layer_containers + service_containers + nodes
+            # 按“资源分组”字段细分：同一服务组内存在多个不同资源分组值时，
+            # 用 __group__ 容器把相同值的节点框在一起，框名即资源分组名。
+            leaf_ids = [
+                node_id for node_id in rendered_ids
+                if node_id != summary_id
+            ]
+            grouped = {}
+            for node_id in leaf_ids:
+                node = node_by_id.get(node_id)
+                if not node:
+                    continue
+                gkey = (
+                    (node["data"].get("group_label") or "").strip().casefold()
+                    or "__none__"
+                )
+                grouped.setdefault(gkey, []).append(node_id)
+
+            if len(grouped) >= 2:
+                group_box_ids = {}
+                for gkey, node_ids in grouped.items():
+                    glabel = (
+                        node_by_id[node_ids[0]]["data"].get("group_label", "")
+                        or "(未设置资源分组)"
+                    )
+                    gid = f"grp_{group_container_counter[0]}"
+                    group_container_counter[0] += 1
+                    group_box_ids[gkey] = gid
+                    group_containers.append({"group": "nodes", "data": {
+                        "id":              gid,
+                        "name":            glabel,
+                        "type":            "__group__",
+                        "service_key":     svc_key,
+                        "layer_key":       layer_key,
+                        "layer_name":      get_topology_layer_name(layer_key),
+                        "resource_total":  len(node_ids),
+                        "is_container":    1,
+                        "parent":          sc_id,
+                        "bg_color":        "#FDFEFE",
+                        "border_color":    "#AAB7B8",
+                        "shape":           "roundrectangle",
+                    }})
+                    for node_id in node_ids:
+                        node = node_by_id.get(node_id)
+                        if node:
+                            node["data"]["parent"] = gid
+                            node["data"]["group_container"] = gid
+                            node["data"]["service_container"] = sc_id
+                            node["data"]["layer_container"] = layer_id
+            else:
+                for node_id in leaf_ids:
+                    node = node_by_id.get(node_id)
+                    if node:
+                        node["data"]["parent"] = sc_id
+                        node["data"]["service_container"] = sc_id
+                        node["data"]["layer_container"] = layer_id
+
+    nodes = (biz_containers + layer_containers + service_containers
+             + group_containers + nodes)
 
     # ── 3. 创建边 ─────────────────────────────────────────────────────────
 
@@ -2648,16 +2709,16 @@ function toggleBusinessView() {{
     // 先摘除叶节点与各级子容器的父子关系
     cy.nodes().forEach(function(n) {{
       var p = n.data('parent');
-      if (p && (p.indexOf('biz_') === 0 || p.indexOf('layer_') === 0 || p.indexOf('sc_') === 0 || p.indexOf('prj_') === 0)) {{
+      if (p && (p.indexOf('biz_') === 0 || p.indexOf('layer_') === 0 || p.indexOf('sc_') === 0 || p.indexOf('grp_') === 0)) {{
         _origParents[n.id()] = p;
         n.move({{ parent: null }});
       }}
     }});
-    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"]').style('display', 'none');
+    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"],[type = "__group__"]').style('display', 'none');
     btn.innerHTML = '&#127968; 业务分组:关';
     btn.style.background = 'rgba(255,255,255,.15)';
   }} else {{
-    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"]').style('display', 'element');
+    cy.nodes('[type = "__business__"],[type = "__layer__"],[type = "__service__"],[type = "__group__"]').style('display', 'element');
     Object.keys(_origParents).forEach(function(nid) {{
       cy.getElementById(nid).move({{ parent: _origParents[nid] }});
     }});

@@ -97,10 +97,13 @@ def create_sample():
         for i in range(1, 3):
             rows.append(r(f"cdn-{bk}-{i:02d}", "CDN", "接入层"))
 
-        # CCE_Deployment（每个业务 132 个，走企业项目聚合）
+        # CCE_Deployment（每个业务 132 个，资源分组字段取多个值，
+        # 用于展示“资源分组”次级框）
+        cce_groups = ["CCE_Deployment", "CCE工作负载", "K8s集群"]
         for i in range(1, 133):
             rows.append(r(
-                f"bj-{bk}-deploy-{i:03d}", "CCE_Deployment", "CCE_Deployment",
+                f"bj-{bk}-deploy-{i:03d}", "CCE_Deployment",
+                cce_groups[i % len(cce_groups)],
                 region="cn-north-4",
                 down=(f"rds-{bk}-master,dcs-{bk}-redis-01"
                       if i % 25 == 0 else ""),
