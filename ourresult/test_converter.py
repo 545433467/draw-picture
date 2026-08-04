@@ -616,7 +616,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         rds_y = [positions[node["id"]]["y"] for node in rds_nodes]
         self.assertTrue(max(ecs_y) < min(rds_y) or max(rds_y) < min(ecs_y))
 
-    def test_services_in_same_layer_are_laid_out_horizontally(self):
+    def test_services_in_same_layer_are_laid_out_in_grid(self):
         records = [
             make_record("ecs-rabbitmq-1", service_type="ecs"),
             make_record("rds-main", service_type="rds"),
@@ -634,10 +634,14 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         self.assertTrue(all(nodes[name]["layer_key"] == "data_middleware_storage"
                             for name in names))
-        self.assertEqual(len({positions[nodes[name]["id"]]["y"]
-                              for name in names}), 1)
-        self.assertEqual(len({positions[nodes[name]["id"]]["x"]
-                              for name in names}), 4)
+        ys = [positions[nodes[name]["id"]]["y"] for name in names]
+        # 每行最多 3 个服务，4 个服务排成 3 + 1 两行
+        self.assertEqual(len(set(ys)), 2)
+        row1 = [y for y in ys if y == min(ys)]
+        row2 = [y for y in ys if y == max(ys)]
+        self.assertEqual(len(row1), 3)
+        self.assertEqual(len(row2), 1)
+        self.assertLess(max(row1), min(row2))
 
     def test_read_excel_keeps_rows_even_when_core_column_exists(self):
         wb = openpyxl.Workbook()

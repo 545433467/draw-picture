@@ -1620,9 +1620,11 @@ def compute_bdat_positions(elements):
     返回 {node_id: {'x': float, 'y': float}}
     """
     NODE_W        = 195
-    ROW_H         = 105
-    SERVICE_GAP   = 90
-    GROUP_GAP     = 170
+    ROW_H         = 125
+    SERVICE_GAP   = 150
+    GROUP_GAP     = 240
+    SERVICES_PER_ROW = 3
+    SERVICE_ROW_GAP = 180
     LAYER_GAP     = 280
     MAX_ROW_NODES = MAX_NODES_PER_ROW
     GROUP_PAD     = 110
@@ -1728,45 +1730,62 @@ def compute_bdat_positions(elements):
 
         service_blocks = {}
         layer_sizes = {}
+        layer_rows = {}
+        layer_row_offsets = {}
         max_layer_w = NODE_W
         for layer_key, ordered_slots in layer_service_orders.items():
+            slot_rows = [
+                ordered_slots[i:i + SERVICES_PER_ROW]
+                for i in range(0, len(ordered_slots), SERVICES_PER_ROW)
+            ]
+            layer_rows[layer_key] = slot_rows
             layer_w = 0
             layer_h = 0
-            for index, slot_key in enumerate(ordered_slots):
-                slot_nodes = services[slot_key]
-                by_group = defaultdict(list)
-                for nid in slot_nodes:
-                    gkey = leaf_nodes[nid].get("group_container") or ""
-                    by_group[gkey].append(nid)
-                group_blocks = []
-                block_w = 0
-                block_h = 0
-                for gkey, g_nodes in by_group.items():
-                    rows = ((len(g_nodes) + MAX_ROW_NODES - 1)
-                            // MAX_ROW_NODES)
-                    g_w = min(len(g_nodes), MAX_ROW_NODES) * NODE_W
-                    g_h = rows * ROW_H
-                    group_blocks.append({
-                        "group_key": gkey,
-                        "nodes": g_nodes,
-                        "w": g_w,
-                        "h": g_h,
-                        "row_count": rows,
-                    })
-                    block_w += g_w
-                    block_h = max(block_h, g_h)
-                if len(group_blocks) > 1:
-                    block_w += GROUP_GAP * (len(group_blocks) - 1)
-                service_blocks[slot_key] = {
-                    "w": block_w,
-                    "h": block_h,
-                    "group_blocks": group_blocks,
-                }
-                layer_w += block_w
-                if index < len(ordered_slots) - 1:
-                    layer_w += SERVICE_GAP
-                layer_h = max(layer_h, block_h)
+            y_acc = 0
+            row_offsets = {}
+            for row_index, row_slots in enumerate(slot_rows):
+                row_w = 0
+                row_h = 0
+                for slot_key in row_slots:
+                    slot_nodes = services[slot_key]
+                    by_group = defaultdict(list)
+                    for nid in slot_nodes:
+                        gkey = leaf_nodes[nid].get("group_container") or ""
+                        by_group[gkey].append(nid)
+                    group_blocks = []
+                    block_w = 0
+                    block_h = 0
+                    for gkey, g_nodes in by_group.items():
+                        g_rows = ((len(g_nodes) + MAX_ROW_NODES - 1)
+                                  // MAX_ROW_NODES)
+                        g_w = min(len(g_nodes), MAX_ROW_NODES) * NODE_W
+                        g_h = g_rows * ROW_H
+                        group_blocks.append({
+                            "group_key": gkey,
+                            "nodes": g_nodes,
+                            "w": g_w,
+                            "h": g_h,
+                            "row_count": g_rows,
+                        })
+                        block_w += g_w
+                        block_h = max(block_h, g_h)
+                    if len(group_blocks) > 1:
+                        block_w += GROUP_GAP * (len(group_blocks) - 1)
+                    service_blocks[slot_key] = {
+                        "w": block_w,
+                        "h": block_h,
+                        "group_blocks": group_blocks,
+                    }
+                    row_w += block_w
+                    row_h = max(row_h, block_h)
+                if len(row_slots) > 1:
+                    row_w += SERVICE_GAP * (len(row_slots) - 1)
+                row_offsets[row_index] = (y_acc, row_w, row_h)
+                layer_w = max(layer_w, row_w)
+                layer_h = max(layer_h, y_acc + row_h)
+                y_acc += row_h + SERVICE_ROW_GAP
             layer_sizes[layer_key] = (layer_w, layer_h)
+            layer_row_offsets[layer_key] = row_offsets
             max_layer_w = max(max_layer_w, layer_w)
 
         y_acc = 0
@@ -1784,6 +1803,8 @@ def compute_bdat_positions(elements):
             "layers": layer_offsets,
             "blocks": service_blocks,
             "layer_sizes": layer_sizes,
+            "layer_rows": layer_rows,
+            "row_offsets": layer_row_offsets,
         }
         group_sizes[biz_key] = (max_layer_w + 2 * GROUP_PAD, group_h)
 
@@ -1821,35 +1842,42 @@ def compute_bdat_positions(elements):
         content_w  = group_sizes[biz_key][0] - 2 * GROUP_PAD
 
         offset_info = service_offsets[biz_key]
-        for layer_key, ordered_slots in service_orders[biz_key].items():
+        for layer_key in service_orders[biz_key].keys():
             layer_y = base_y + offset_info["layers"][layer_key]
             layer_w, layer_h = offset_info["layer_sizes"][layer_key]
-            service_x = base_x + (content_w - layer_w) / 2
-            for slot_key in ordered_slots:
-                block = offset_info["blocks"][slot_key]
-                service_y = layer_y + (layer_h - block["h"]) / 2
-                next_service_x = service_x + block["w"] + SERVICE_GAP
-                group_x = service_x
-                for gblock in block["group_blocks"]:
-                    g_nodes = gblock["nodes"]
-                    g_w = min(len(g_nodes), MAX_ROW_NODES) * NODE_W
-                    y_pos = service_y + (block["h"] - gblock["h"]) / 2
-                    for row_index in range(gblock["row_count"]):
-                        row_nodes = g_nodes[
-                            row_index * MAX_ROW_NODES:
-                            (row_index + 1) * MAX_ROW_NODES
-                        ]
-                        row_span = (len(row_nodes) - 1) * NODE_W
-                        row_start_x = group_x + (g_w - row_span) / 2
-                        y_row = y_pos + row_index * ROW_H
-                        for column_index, node_id in enumerate(row_nodes):
-                            positions[node_id] = {
-                                "x": round(row_start_x + column_index * NODE_W,
-                                           1),
-                                "y": round(y_row, 1),
-                            }
-                    group_x += g_w + GROUP_GAP
-                service_x = next_service_x
+            layer_x = base_x + (content_w - layer_w) / 2
+            layer_rows = offset_info["layer_rows"][layer_key]
+            row_offsets = offset_info["row_offsets"][layer_key]
+            for row_index, row_slots in enumerate(layer_rows):
+                row_y_off, row_w, row_h = row_offsets[row_index]
+                row_x = layer_x + (layer_w - row_w) / 2
+                service_x = row_x
+                for slot_key in row_slots:
+                    block = offset_info["blocks"][slot_key]
+                    service_y = layer_y + row_y_off + (row_h - block["h"]) / 2
+                    next_service_x = service_x + block["w"] + SERVICE_GAP
+                    group_x = service_x
+                    for gblock in block["group_blocks"]:
+                        g_nodes = gblock["nodes"]
+                        g_w = min(len(g_nodes), MAX_ROW_NODES) * NODE_W
+                        y_pos = service_y + (block["h"] - gblock["h"]) / 2
+                        for g_row_index in range(gblock["row_count"]):
+                            row_nodes = g_nodes[
+                                g_row_index * MAX_ROW_NODES:
+                                (g_row_index + 1) * MAX_ROW_NODES
+                            ]
+                            row_span = (len(row_nodes) - 1) * NODE_W
+                            row_start_x = group_x + (g_w - row_span) / 2
+                            y_row = y_pos + g_row_index * ROW_H
+                            for column_index, node_id in enumerate(row_nodes):
+                                positions[node_id] = {
+                                    "x": round(
+                                        row_start_x + column_index * NODE_W, 1
+                                    ),
+                                    "y": round(y_row, 1),
+                                }
+                        group_x += g_w + GROUP_GAP
+                    service_x = next_service_x
 
     # 给容器节点补坐标：自底向上按直接子节点中心定位，保证多级嵌套容器
     # （资源分组框 / 服务框 / 层框 / 业务框）之间互不重叠。
@@ -1942,7 +1970,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "text-background-color": "#fff",
                 "text-background-opacity": 0.8,
                 "text-background-padding": "2px",
-                "text-max-width": "220px",
+                "text-max-width": "170px",
                 "text-wrap": "wrap",
             }
         },
@@ -2088,7 +2116,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "text-halign": "center",
                 "text-margin-y": 0,
                 "text-background-opacity": 0,
-                "text-max-width": "260px",
+                "text-max-width": "165px",
                 "text-wrap": "wrap",
                 "color": "#2C3E50",
             }
@@ -2114,7 +2142,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "text-background-color": "#fff",
                 "text-background-opacity": 0.86,
                 "text-background-padding": "2px",
-                "text-max-width": "240px",
+                "text-max-width": "160px",
                 "text-wrap": "wrap",
             }
         },
