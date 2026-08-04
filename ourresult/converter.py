@@ -2190,6 +2190,14 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 .sum-pager .pg-btn:hover{{background:#E8EAF6}}
 .sum-pager .pg-btn:disabled{{opacity:.4;cursor:not-allowed}}
 .sum-hint{{font-size:12px;color:#888;margin:0 0 8px 2px}}
+.sum-info{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px}}
+.sum-info-item{{display:flex;flex-direction:column;min-width:130px;
+  padding:8px 14px;border:1px solid #d5d8dc;border-radius:6px;
+  background:#FAFBFC}}
+.sum-info-label{{font-size:11px;color:#888;text-transform:uppercase;
+  letter-spacing:.5px;margin-bottom:4px}}
+.sum-info-value{{font-size:15px;font-weight:700;color:#2C3E50;
+  word-break:break-all}}
 </style>
 </head>
 <body>
@@ -2448,7 +2456,6 @@ var SUMMARY_COLUMNS = [
   ['ep', '企业项目'],
   ['business', '所属业务'],
   ['group', '资源分组'],
-  ['downstream', '下游服务'],
 ];
 
 function summaryRow(item) {{
@@ -2459,18 +2466,14 @@ function summaryRow(item) {{
     ep: item.enterprise_project || item.project || '-',
     business: item.business || '-',
     group: item.group || '-',
-    downstream: (item.downstream || []).join(', ') || '-',
   }};
 }}
 
 function showSummaryDetail(d) {{
   var drawer = document.getElementById('summary-drawer');
+  drawer._summary = d;
   drawer._resources = d.summary_resources || [];
   drawer._page = 0;
-  document.getElementById('drawer-title').textContent =
-    '折叠资源明细（' + (d.business || '-') + ' / ' +
-    (d.service_name || d.service_key || '-') + '，共 ' +
-    drawer._resources.length + ' 个节点）';
   renderSummaryTable();
   drawer.classList.add('open');
   document.getElementById('drawer-backdrop').classList.add('open');
@@ -2478,6 +2481,7 @@ function showSummaryDetail(d) {{
 
 function renderSummaryTable() {{
   var drawer = document.getElementById('summary-drawer');
+  var d = drawer._summary || {{}};
   var resources = drawer._resources || [];
   var pageSize = SUMMARY_PAGE_SIZE;
   var pages = Math.max(1, Math.ceil(resources.length / pageSize));
@@ -2486,8 +2490,22 @@ function renderSummaryTable() {{
   var start = page * pageSize;
   var pageItems = resources.slice(start, start + pageSize);
 
-  var html = '<div class="sum-hint">共 ' + resources.length +
-             ' 个节点，每页 ' + pageSize + ' 条；表格可左右拖动查看完整内容。</div>';
+  var infoItems = [
+    ['所属业务', d.business || '-'],
+    ['服务类型', d.service_name || d.service_key || '-'],
+    ['所属层', d.layer_name || '-'],
+    ['资源总数', d.resource_total || resources.length],
+    ['省略节点', d.collapsed_count || 0],
+  ];
+  var html = '<div class="sum-info">';
+  infoItems.forEach(function(item) {{
+    html += '<div class="sum-info-item"><span class="sum-info-label">' +
+            escHtml(item[0]) + '</span><span class="sum-info-value">' +
+            escHtml(item[1]) + '</span></div>';
+  }});
+  html += '</div>';
+  html += '<div class="sum-hint">共 ' + resources.length +
+          ' 个节点，每页 ' + pageSize + ' 条；表格可左右拖动查看完整内容。</div>';
   html += '<table class="sum-table"><thead><tr>';
   SUMMARY_COLUMNS.forEach(function(col) {{
     html += '<th>' + escHtml(col[1]) + '</th>';
