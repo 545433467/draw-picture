@@ -1065,26 +1065,66 @@ def build_graph(records):
         if split_group_key(group_key)[4] is not None
     }
 
+    # 收集所有被引用（作为下游目标）的资源名，用于判断 ECS 是否有上游调用。
+    referenced_names = set()
+    for entry in entries:
+        r = entry["record"]
+        for target_name in split_target_names(r.get("targets", "")):
+            referenced_names.add(name_key(target_name))
+        for target_name in split_target_names(r.get("inferred_targets", "")):
+            referenced_names.add(
+                name_key(parse_inferred_reference(target_name)["target_name"])
+            )
+
+    def entry_has_call_relation(entry):
+        """ECS 有下游服务或作为上游被调用时返回 True。"""
+        r = entry["record"]
+        has_downstream = bool(
+            split_target_names(r.get("targets", ""))
+            or split_target_names(r.get("inferred_targets", ""))
+        )
+        has_upstream = name_key(entry["data"]["name"]) in referenced_names
+        return has_downstream or has_upstream
+
     visible_indexes = set()
     group_info = {}
     for group_index, (group_key, group_entries) in enumerate(service_groups.items()):
-        visible_entries = group_entries[:MAX_VISIBLE_SERVICE_NODES]
-        hidden_entries = group_entries[MAX_VISIBLE_SERVICE_NODES:]
-        visible_indexes.update(entry["index"] for entry in visible_entries)
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
         )
+        # CCE 企业项目组不渲染单个节点；非 ECS 服务全部展示（不再缩略）；
+        # ECS 只展示有调用关系的节点，其余合并为摘要。
+        if project_key is not None:
+            visible_entries = []
+            hidden_entries = []
+        elif svc_key == "ecs":
+            visible_entries = [
+                entry for entry in group_entries
+                if entry_has_call_relation(entry)
+            ]
+            hidden_entries = [
+                entry for entry in group_entries
+                if not entry_has_call_relation(entry)
+            ]
+        else:
+            visible_entries = list(group_entries)
+            hidden_entries = []
+        visible_indexes.update(entry["index"] for entry in visible_entries)
         project_label = ""
         if project_key is not None:
             project_label = (
                 group_entries[0]["data"].get("enterprise_project", "")
                 or "(未设置企业项目)"
             )
+        first_id = (
+            visible_entries[0]["data"]["id"]
+            if visible_entries else group_entries[0]["data"]["id"]
+        )
         group_info[group_key] = {
             "entries": group_entries,
             "visible": visible_entries,
             "hidden": hidden_entries,
-            "first_id": visible_entries[0]["data"]["id"],
+            "first_id": first_id,
             "summary_id": "",
             "group_index": group_index,
             "project_key": project_key,
@@ -2306,8 +2346,28 @@ cy.on('tap', 'node', function(evt) {{
     showNodeDetail(d, bg);
   }}
   cy.elements().addClass('faded');
+  var isContainerType = d.type === '__region__' || d.type === '__group__' ||
+                        d.type === '__business__' || d.type === '__layer__' ||
+                        d.type === '__service__';
+  if (!isContainerType) {{
+    // 展开整条调用链路：反复闭包邻域，直到覆盖所有可达的上游、下游节点
+    // 与它们之间的全部调用线。
+    var chain = evt.target.closedNeighborhood();
+    var prev = 0;
+    while (chain.length !== prev) {{
+      prev = chain.length;
+      chain = chain.closedNeighborhood();
+    }}
+    chain.edges().removeClass('faded');
+    chain.nodes().filter(function(n) {{
+      var t = n.data('type');
+      return t !== '__region__' && t !== '__group__' && t !== '__business__' &&
+             t !== '__layer__' && t !== '__service__';
+    }}).removeClass('faded').addClass('highlighted');
+  }} else {{
+    evt.target.neighborhood().removeClass('faded');
+  }}
   evt.target.removeClass('faded').addClass('highlighted');
-  evt.target.neighborhood().removeClass('faded');
 }});
 
 // ── 事件：点击边 ──────────────────────────────────────────────────────────
