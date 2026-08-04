@@ -378,6 +378,14 @@ def make_node_display_label(name, service_key):
     return f"{service_name}\n{compact_resource_name(name)}"
 
 
+def container_min_width(text, font_size=22, padding=48):
+    """按名称长度估算容器最小宽度，保证框内文字完整显示、不缩写。"""
+    units = 0
+    for char in str(text or ""):
+        units += font_size if ord(char) > 127 else font_size * 0.62
+    return int(units + padding)
+
+
 TOPOLOGY_LAYERS = [
     ("access", "渠道接入与安全边界"),
     ("network_lb", "网络与负载均衡层"),
@@ -1136,50 +1144,68 @@ def build_graph(records):
             "inferred_downstream": split_target_names(r.get("inferred_targets", "")),
         }
 
-    # 每个超限组只增加一个摘要节点；摘要节点承接组内隐藏资源的连线。
+    # 摘要节点：隐藏资源按“资源分组”值拆分，每个资源分组一个摘要节点，
+    # 以便体现摘要节点归属的资源分组；摘要节点承接组内隐藏资源的连线。
+    summary_counter = [0]
     for group_key, info in group_info.items():
-        hidden_count = len(info["hidden"])
-        if not hidden_count:
+        hidden_entries = info["hidden"]
+        if not hidden_entries:
             continue
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
         )
         sample_data = info["entries"][0]["data"]
-        summary_id = f"summary_{info['group_index']}"
-        info["summary_id"] = summary_id
         bg, border, _ = SERVICE_STYLE.get(svc_key, SERVICE_STYLE["default"])
-        nodes.append({"group": "nodes", "data": {
-            "id":              summary_id,
-            "name":            f"...+{hidden_count}",
-            "type":            "__summary__",
-            "service_key":     svc_key,
-            "service_name":    get_service_display_name(svc_key),
-            "layer_key":       layer_key,
-            "layer_name":      get_topology_layer_name(layer_key),
-            "business":        sample_data["business"],
-            "business_key":    biz_key,
-            "is_virtual_business": sample_data["is_virtual_business"],
-            "is_grouped_resource": 1,
-            "collapsed_count": hidden_count,
-            "resource_total":  len(info["entries"]),
-            "summary_resources": [
-                make_summary_resource(entry) for entry in info["hidden"]
-            ],
-            "spec":            "",
-            "desc":            "其余同类资源已折叠显示",
-            "resource_id":     "",
-            "enterprise_id":   "",
-            "enterprise_project": "",
-            "cce_business_prefix": sample_data.get("cce_business_prefix", ""),
-            "region":          "",
-            "group_label":     "",
-            "reason":          "",
-            "bg_color":        bg,
-            "border_color":    border,
-            "shape":           "roundrectangle",
-            "is_container":    0,
-            "is_summary":      1,
-        }})
+        hidden_by_group = defaultdict(list)
+        for entry in hidden_entries:
+            gkey = (
+                (entry["data"].get("group_label") or "").strip().casefold()
+                or "__none__"
+            )
+            hidden_by_group[gkey].append(entry)
+        summary_ids = {}
+        for gkey, g_entries in hidden_by_group.items():
+            glabel = (
+                g_entries[0]["data"].get("group_label", "")
+                or "(未设置资源分组)"
+            )
+            summary_id = f"summary_{summary_counter[0]}"
+            summary_counter[0] += 1
+            summary_ids[gkey] = summary_id
+            nodes.append({"group": "nodes", "data": {
+                "id":              summary_id,
+                "name":            f"...+{len(g_entries)}",
+                "type":            "__summary__",
+                "service_key":     svc_key,
+                "service_name":    get_service_display_name(svc_key),
+                "layer_key":       layer_key,
+                "layer_name":      get_topology_layer_name(layer_key),
+                "business":        sample_data["business"],
+                "business_key":    biz_key,
+                "is_virtual_business": sample_data["is_virtual_business"],
+                "is_grouped_resource": 1,
+                "collapsed_count": len(g_entries),
+                "resource_total":  len(g_entries),
+                "summary_resources": [
+                    make_summary_resource(entry) for entry in g_entries
+                ],
+                "spec":            "",
+                "desc":            "其余同类资源已折叠显示",
+                "resource_id":     "",
+                "enterprise_id":   "",
+                "enterprise_project": "",
+                "cce_business_prefix": sample_data.get("cce_business_prefix", ""),
+                "region":          "",
+                "group_label":     glabel,
+                "reason":          "",
+                "bg_color":        bg,
+                "border_color":    border,
+                "shape":           "roundrectangle",
+                "is_container":    0,
+                "is_summary":      1,
+            }})
+        info["summary_ids"] = summary_ids
+        info["summary_id"] = next(iter(summary_ids.values()), "")
 
     # ── 2. 创建业务容器节点，为叶节点设置 parent ─────────────────────────
 
@@ -1214,6 +1240,7 @@ def build_graph(records):
         biz_containers.append({"group": "nodes", "data": {
             "id":           biz_id,
             "name":         meta["name"],
+            "min_width":    container_min_width(meta["name"], font_size=26),
             "business_key": biz_key,
             "resource_total": business_totals[biz_key],
             "is_virtual_business": meta["is_virtual"],
@@ -1251,6 +1278,9 @@ def build_graph(records):
             layer_containers.append({"group": "nodes", "data": {
                 "id":              layer_id,
                 "name":            get_topology_layer_name(layer_key),
+                "min_width":       container_min_width(
+                    get_topology_layer_name(layer_key), font_size=22
+                ),
                 "type":            "__layer__",
                 "layer_key":       layer_key,
                 "layer_name":      get_topology_layer_name(layer_key),
@@ -1288,8 +1318,8 @@ def build_graph(records):
         biz_id = business_map[biz_key]
         group_meta = group_info[group_key]
         rendered_ids = {entry["data"]["id"] for entry in group_meta["visible"]}
-        if group_meta["summary_id"]:
-            rendered_ids.add(group_meta["summary_id"])
+        for sid in group_meta.get("summary_ids", {}).values():
+            rendered_ids.add(sid)
 
         is_virtual = business_meta[biz_key]["is_virtual"]
         if is_virtual:
@@ -1307,6 +1337,9 @@ def build_graph(records):
                 service_containers.append({"group": "nodes", "data": {
                     "id":              sc_id,
                     "name":            get_service_display_name(svc_key),
+                    "min_width":       container_min_width(
+                        get_service_display_name(svc_key), font_size=22
+                    ),
                     "type":            "__service__",
                     "service_key":     svc_key,
                     "layer_key":       layer_key,
@@ -1323,37 +1356,52 @@ def build_graph(records):
             sc_id = service_container_ids[sc_key]
 
         if sc_id is not None:
-            # 摘要节点始终直接挂在服务框下。
-            summary_id = group_meta["summary_id"]
-            if summary_id:
-                summary_node = node_by_id.get(summary_id)
-                if summary_node:
-                    summary_node["data"]["parent"] = sc_id
-                    summary_node["data"]["service_container"] = sc_id
-                    summary_node["data"]["layer_container"] = layer_id
+            summary_ids = group_meta.get("summary_ids", {})
+            summary_nodes = [
+                node_by_id.get(sid) for sid in summary_ids.values()
+            ]
+            summary_nodes = [n for n in summary_nodes if n]
 
-            # 按“资源分组”字段细分：同一服务组内存在多个不同资源分组值时，
-            # 用 __group__ 容器把相同值的节点框在一起，框名即资源分组名。
             leaf_ids = [
                 node_id for node_id in rendered_ids
-                if node_id != summary_id
+                if node_id not in set(summary_ids.values())
             ]
-            grouped = {}
-            for node_id in leaf_ids:
-                node = node_by_id.get(node_id)
-                if not node:
-                    continue
-                gkey = (
+
+            # 按“资源分组”字段细分：同一服务组内存在多个不同资源分组值时，
+            # 用 __group__ 容器把相同值的节点（含摘要节点）框在一起，
+            # 框名即资源分组名。
+            def node_group_key(node):
+                return (
                     (node["data"].get("group_label") or "").strip().casefold()
                     or "__none__"
                 )
-                grouped.setdefault(gkey, []).append(node_id)
 
-            if len(grouped) >= 2:
+            distinct_groups = set()
+            for node_id in leaf_ids:
+                node = node_by_id.get(node_id)
+                if node:
+                    distinct_groups.add(node_group_key(node))
+            for snode in summary_nodes:
+                distinct_groups.add(node_group_key(snode))
+
+            if len(distinct_groups) >= 2:
+                grouped = defaultdict(list)
+                for node_id in leaf_ids:
+                    node = node_by_id.get(node_id)
+                    if node:
+                        grouped[node_group_key(node)].append(node_id)
                 group_box_ids = {}
-                for gkey, node_ids in grouped.items():
+                for gkey in distinct_groups:
+                    sample_node = None
+                    if grouped.get(gkey):
+                        sample_node = node_by_id[grouped[gkey][0]]
+                    else:
+                        sample_node = next(
+                            (n for n in summary_nodes
+                             if node_group_key(n) == gkey), None
+                        )
                     glabel = (
-                        node_by_id[node_ids[0]]["data"].get("group_label", "")
+                        sample_node["data"].get("group_label", "")
                         or "(未设置资源分组)"
                     )
                     gid = f"grp_{group_container_counter[0]}"
@@ -1362,17 +1410,26 @@ def build_graph(records):
                     group_containers.append({"group": "nodes", "data": {
                         "id":              gid,
                         "name":            glabel,
+                        "min_width":       container_min_width(
+                            glabel, font_size=22
+                        ),
                         "type":            "__group__",
                         "service_key":     svc_key,
                         "layer_key":       layer_key,
                         "layer_name":      get_topology_layer_name(layer_key),
-                        "resource_total":  len(node_ids),
+                        "resource_total":  len(grouped.get(gkey, []))
+                                         + sum(
+                                             1 for n in summary_nodes
+                                             if node_group_key(n) == gkey
+                                         ),
                         "is_container":    1,
                         "parent":          sc_id,
                         "bg_color":        "#FDFEFE",
                         "border_color":    "#AAB7B8",
                         "shape":           "roundrectangle",
                     }})
+                for gkey, node_ids in grouped.items():
+                    gid = group_box_ids[gkey]
                     for node_id in node_ids:
                         node = node_by_id.get(node_id)
                         if node:
@@ -1380,6 +1437,12 @@ def build_graph(records):
                             node["data"]["group_container"] = gid
                             node["data"]["service_container"] = sc_id
                             node["data"]["layer_container"] = layer_id
+                for snode in summary_nodes:
+                    gid = group_box_ids.get(node_group_key(snode), sc_id)
+                    snode["data"]["parent"] = gid
+                    snode["data"]["group_container"] = gid
+                    snode["data"]["service_container"] = sc_id
+                    snode["data"]["layer_container"] = layer_id
             else:
                 for node_id in leaf_ids:
                     node = node_by_id.get(node_id)
@@ -1387,6 +1450,10 @@ def build_graph(records):
                         node["data"]["parent"] = sc_id
                         node["data"]["service_container"] = sc_id
                         node["data"]["layer_container"] = layer_id
+                for snode in summary_nodes:
+                    snode["data"]["parent"] = sc_id
+                    snode["data"]["service_container"] = sc_id
+                    snode["data"]["layer_container"] = layer_id
 
     nodes = (biz_containers + layer_containers + service_containers
              + group_containers + nodes)
@@ -1397,7 +1464,12 @@ def build_graph(records):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
-        return group_info[entry["group_key"]]["summary_id"]
+        gkey = (
+            (entry["data"].get("group_label") or "").strip().casefold()
+            or "__none__"
+        )
+        sid = group_info[entry["group_key"]].get("summary_ids", {}).get(gkey)
+        return sid or group_info[entry["group_key"]]["summary_id"]
 
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
@@ -1543,12 +1615,14 @@ def compute_bdat_positions(elements):
     按业务分组（BDAT）计算节点的预设坐标：
     - 各业务组横向排列成网格
     - 组内以服务类型为不可拆分的连续矩形块
-    - 服务块按依赖关系纵向排序，块内每行最多 5 个节点
+    - 服务块按依赖关系纵向排序，块内每行最多 MAX_NODES_PER_ROW 个节点
+    - 同一服务块内按“资源分组”再拆成独立小方块，块与块之间留有间隔
     返回 {node_id: {'x': float, 'y': float}}
     """
     NODE_W        = 195
     ROW_H         = 105
     SERVICE_GAP   = 90
+    GROUP_GAP     = 170
     LAYER_GAP     = 280
     MAX_ROW_NODES = MAX_NODES_PER_ROW
     GROUP_PAD     = 110
@@ -1659,14 +1733,34 @@ def compute_bdat_positions(elements):
             layer_w = 0
             layer_h = 0
             for index, slot_key in enumerate(ordered_slots):
-                row_count = ((len(services[slot_key]) + MAX_ROW_NODES - 1)
-                             // MAX_ROW_NODES)
-                block_w = min(len(services[slot_key]), MAX_ROW_NODES) * NODE_W
-                block_h = row_count * ROW_H
+                slot_nodes = services[slot_key]
+                by_group = defaultdict(list)
+                for nid in slot_nodes:
+                    gkey = leaf_nodes[nid].get("group_container") or ""
+                    by_group[gkey].append(nid)
+                group_blocks = []
+                block_w = 0
+                block_h = 0
+                for gkey, g_nodes in by_group.items():
+                    rows = ((len(g_nodes) + MAX_ROW_NODES - 1)
+                            // MAX_ROW_NODES)
+                    g_w = min(len(g_nodes), MAX_ROW_NODES) * NODE_W
+                    g_h = rows * ROW_H
+                    group_blocks.append({
+                        "group_key": gkey,
+                        "nodes": g_nodes,
+                        "w": g_w,
+                        "h": g_h,
+                        "row_count": rows,
+                    })
+                    block_w += g_w
+                    block_h = max(block_h, g_h)
+                if len(group_blocks) > 1:
+                    block_w += GROUP_GAP * (len(group_blocks) - 1)
                 service_blocks[slot_key] = {
                     "w": block_w,
                     "h": block_h,
-                    "row_count": row_count,
+                    "group_blocks": group_blocks,
                 }
                 layer_w += block_w
                 if index < len(ordered_slots) - 1:
@@ -1732,23 +1826,30 @@ def compute_bdat_positions(elements):
             layer_w, layer_h = offset_info["layer_sizes"][layer_key]
             service_x = base_x + (content_w - layer_w) / 2
             for slot_key in ordered_slots:
-                service_nodes = group_services[biz_key][slot_key]
                 block = offset_info["blocks"][slot_key]
                 service_y = layer_y + (layer_h - block["h"]) / 2
-                row_count = block["row_count"]
-                for row_index in range(row_count):
-                    row_nodes = service_nodes[
-                        row_index * MAX_ROW_NODES:(row_index + 1) * MAX_ROW_NODES
-                    ]
-                    span = (len(row_nodes) - 1) * NODE_W
-                    start_x = service_x + (block["w"] - span) / 2
-                    y_pos = service_y + row_index * ROW_H
-                    for column_index, node_id in enumerate(row_nodes):
-                        positions[node_id] = {
-                            "x": round(start_x + column_index * NODE_W, 1),
-                            "y": round(y_pos, 1),
-                        }
-                service_x += block["w"] + SERVICE_GAP
+                next_service_x = service_x + block["w"] + SERVICE_GAP
+                group_x = service_x
+                for gblock in block["group_blocks"]:
+                    g_nodes = gblock["nodes"]
+                    g_w = min(len(g_nodes), MAX_ROW_NODES) * NODE_W
+                    y_pos = service_y + (block["h"] - gblock["h"]) / 2
+                    for row_index in range(gblock["row_count"]):
+                        row_nodes = g_nodes[
+                            row_index * MAX_ROW_NODES:
+                            (row_index + 1) * MAX_ROW_NODES
+                        ]
+                        row_span = (len(row_nodes) - 1) * NODE_W
+                        row_start_x = group_x + (g_w - row_span) / 2
+                        y_row = y_pos + row_index * ROW_H
+                        for column_index, node_id in enumerate(row_nodes):
+                            positions[node_id] = {
+                                "x": round(row_start_x + column_index * NODE_W,
+                                           1),
+                                "y": round(y_row, 1),
+                            }
+                    group_x += g_w + GROUP_GAP
+                service_x = next_service_x
 
     return positions
 
@@ -1814,6 +1915,7 @@ def _make_cytoscape_style(icon_data_uris=None):
             "selector": "node[is_container = 1]",
             "style": {
                 "label": "data(name)",
+                "min-width": "data(min_width)",
                 "text-valign": "top",
                 "font-size": 20,
                 "font-weight": "bold",

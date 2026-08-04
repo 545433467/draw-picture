@@ -88,26 +88,30 @@ class BuildGraphAggregationTests(unittest.TestCase):
         nodes = element_data(elements, "nodes")
         resource_nodes = [node for node in nodes if not node.get("is_container")]
         service = next(node for node in nodes if node.get("type") == "__service__")
-        summary = next(node for node in nodes if node.get("is_summary"))
+        summaries = [node for node in nodes if node.get("is_summary")]
+        summary = next(node for node in summaries
+                       if node.get("group_label") == "hidden-group")
+        default_summary = next(node for node in summaries
+                               if node.get("group_label") == "(未设置资源分组)")
 
         self.assertEqual(service["name"], "ECS")
         self.assertEqual(service["resource_total"], 8)
         self.assertEqual(service["visible_count"], 3)
         self.assertEqual(service["collapsed_count"], 5)
-        self.assertEqual(len(resource_nodes), 4)  # 3 个 ECS + 1 个摘要
-        self.assertEqual(summary["name"], "...+5")
-        self.assertEqual(summary["collapsed_count"], 5)
-        self.assertEqual(summary["parent"], service["id"])
-        self.assertEqual(len(summary["summary_resources"]), 5)
-        first_hidden = summary["summary_resources"][0]
+        # 隐藏资源按资源分组拆分：空分组 4 个 + hidden-group 1 个
+        self.assertEqual(len(resource_nodes), 5)  # 3 个 ECS + 2 个摘要
+        self.assertEqual(default_summary["name"], "...+4")
+        self.assertEqual(default_summary["collapsed_count"], 4)
+        self.assertEqual(summary["name"], "...+1")
+        self.assertEqual(summary["collapsed_count"], 1)
+        self.assertEqual(summary["group_label"], "hidden-group")
+        self.assertEqual(len(summary["summary_resources"]), 1)
+        first_hidden = default_summary["summary_resources"][0]
         self.assertEqual(first_hidden["name"], "ecs-node-4")
         self.assertEqual(first_hidden["type"], "ECS")
         self.assertEqual(first_hidden["business"], "业务A")
         self.assertEqual(first_hidden["downstream"], [])
-        hidden_with_meta = next(
-            item for item in summary["summary_resources"]
-            if item["group"] == "hidden-group"
-        )
+        hidden_with_meta = summary["summary_resources"][0]
         self.assertEqual(hidden_with_meta["name"], "ecs-node-5")
         self.assertEqual(hidden_with_meta["project"], "ep-hidden")
         self.assertEqual(hidden_with_meta["source"], "inventory-sheet")
