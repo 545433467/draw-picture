@@ -379,10 +379,10 @@ def make_node_display_label(name, service_key):
 
 
 TOPOLOGY_LAYERS = [
-    ("access", "第一层：接入层"),
-    ("network_lb", "第二层：网络与负载均衡层"),
-    ("compute_app", "第三层：计算、容器与应用服务层"),
-    ("data_middleware_storage", "第四层：中间件、数据与存储层"),
+    ("access", "渠道接入与安全边界"),
+    ("network_lb", "网络与负载均衡层"),
+    ("compute_app", "计算、容器与应用服务层"),
+    ("data_middleware_storage", "中间件、数据与存储层"),
 ]
 TOPOLOGY_LAYER_ORDER = {key: index for index, (key, _) in enumerate(TOPOLOGY_LAYERS)}
 TOPOLOGY_LAYER_NAMES = dict(TOPOLOGY_LAYERS)
@@ -431,7 +431,8 @@ _VIRTUAL_CONTAINER_TYPES = {
 }
 
 # 同一业务、同一服务类型最多渲染的真实资源数。其余资源合并为一个摘要节点。
-MAX_VISIBLE_SERVICE_NODES = 5
+# 布局：每行最多摆放的云资源节点数
+MAX_NODES_PER_ROW = 7
 
 # 业务容器的调色板（背景, 边框, 标题色）——按顺序循环分配给各业务
 BUSINESS_PALETTE = [
@@ -734,11 +735,7 @@ def build_graph(records):
         else:
             biz_key = f"__service_business__:{svc_key}"
         biz_label = source_biz or get_service_display_name(svc_key)
-        if is_cce and cce_prefix:
-            project_key = enterprise_project.casefold() or "__none__"
-            group_key = (biz_key, layer_key, svc_key, project_key)
-        else:
-            group_key = (biz_key, layer_key, svc_key)
+        group_key = (biz_key, layer_key, svc_key)
 
         data = {
             "id":            nid,
@@ -1058,13 +1055,6 @@ def build_graph(records):
     for entry in entries:
         service_groups[entry["group_key"]].append(entry)
 
-    # CCE_Deployment 分组键（含企业项目）。这些组不渲染单个资源节点，
-    # 由每企业项目一个聚合节点代替。
-    cce_project_group_keys = {
-        group_key for group_key in service_groups
-        if split_group_key(group_key)[4] is not None
-    }
-
     # 收集所有被引用（作为下游目标）的资源名，用于判断 ECS 是否有上游调用。
     referenced_names = set()
     for entry in entries:
@@ -1092,12 +1082,9 @@ def build_graph(records):
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
         )
-        # CCE 企业项目组不渲染单个节点；非 ECS 服务全部展示（不再缩略）；
-        # ECS 只展示有调用关系的节点，其余合并为摘要。
-        if project_key is not None:
-            visible_entries = []
-            hidden_entries = []
-        elif svc_key == "ecs":
+        # 非 ECS 服务全部展示（不再缩略）；ECS 只展示有调用关系的节点，
+        # 其余合并为摘要。
+        if svc_key == "ecs":
             visible_entries = [
                 entry for entry in group_entries
                 if entry_has_call_relation(entry)
@@ -1110,12 +1097,6 @@ def build_graph(records):
             visible_entries = list(group_entries)
             hidden_entries = []
         visible_indexes.update(entry["index"] for entry in visible_entries)
-        project_label = ""
-        if project_key is not None:
-            project_label = (
-                group_entries[0]["data"].get("enterprise_project", "")
-                or "(未设置企业项目)"
-            )
         first_id = (
             visible_entries[0]["data"]["id"]
             if visible_entries else group_entries[0]["data"]["id"]
@@ -1127,13 +1108,10 @@ def build_graph(records):
             "first_id": first_id,
             "summary_id": "",
             "group_index": group_index,
-            "project_key": project_key,
-            "project_label": project_label,
         }
 
     for entry in entries:
-        if (entry["index"] in visible_indexes
-                and entry["group_key"] not in cce_project_group_keys):
+        if entry["index"] in visible_indexes:
             nodes.append({"group": "nodes", "data": entry["data"]})
 
     def make_summary_resource(entry):
@@ -1157,8 +1135,6 @@ def build_graph(records):
 
     # 每个超限组只增加一个摘要节点；摘要节点承接组内隐藏资源的连线。
     for group_key, info in group_info.items():
-        if group_key in cce_project_group_keys:
-            continue
         hidden_count = len(info["hidden"])
         if not hidden_count:
             continue
@@ -1189,8 +1165,8 @@ def build_graph(records):
             "spec":            "",
             "desc":            "其余同类资源已折叠显示",
             "resource_id":     "",
-            "enterprise_id":   info.get("project_label", ""),
-            "enterprise_project": info.get("project_label", ""),
+            "enterprise_id":   "",
+            "enterprise_project": "",
             "cce_business_prefix": sample_data.get("cce_business_prefix", ""),
             "region":          "",
             "group_label":     "",
@@ -1210,8 +1186,7 @@ def build_graph(records):
     for entry in entries:
         business_totals[entry["data"]["business_key"]] += 1
     _biz_counter = 0
-    # 从全部 entries 建立业务容器映射（CCE 聚合组不渲染资源节点，
-    # 但其所属业务仍需要容器）。
+    # 从全部 entries 建立业务容器映射。
     for entry in entries:
         biz_key = entry["data"].get("business_key", "").strip()
         if not biz_key:
@@ -1251,21 +1226,13 @@ def build_graph(records):
     service_containers = []
     node_by_id = {node["data"]["id"]: node for node in nodes}
 
-    # CCE_Deployment 企业项目分组所在的业务：即使未填写所属业务（虚拟业务），
-    # 也要为其建立计算层容器，确保 CCE 分组落在“第三层：计算…”之内。
-    cce_project_bizs = {
-        split_group_key(group_key)[0]
-        for group_key in service_groups
-        if split_group_key(group_key)[4] is not None
-    }
-
     layers_by_business = defaultdict(set)
     layer_totals = defaultdict(int)
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
         )
-        if business_meta[biz_key]["is_virtual"] and biz_key not in cce_project_bizs:
+        if business_meta[biz_key]["is_virtual"]:
             continue
         layers_by_business[biz_key].add(layer_key)
         layer_totals[(biz_key, layer_key)] += len(info)
@@ -1292,10 +1259,8 @@ def build_graph(records):
                 "shape":           "roundrectangle",
             }})
 
-    # 服务容器按 (业务, 层, 服务) 去重创建；CCE_Deployment 组不再渲染任何
-    # 资源节点，每个企业项目生成一个聚合节点 __cce_project__（显示 CCE 图标，
-    # 名称为企业项目）与一个独立数字徽标 __cce_count__（红色圆圈 + 红色数字，
-    # 定位在图标上方）。
+    # 服务容器按 (业务, 层, 服务) 去重创建；CCE/CCE_Deployment 与其他非 ECS
+    # 资源一样全部展示，不再聚合或缩略。
     service_agg = {}
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
@@ -1311,8 +1276,6 @@ def build_graph(records):
             agg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
     service_container_ids = {}
-    cce_project_nodes = []
-    cce_count_nodes = []
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
@@ -1324,7 +1287,7 @@ def build_graph(records):
             rendered_ids.add(group_meta["summary_id"])
 
         is_virtual = business_meta[biz_key]["is_virtual"]
-        if is_virtual and biz_key not in cce_project_bizs:
+        if is_virtual:
             continue
 
         layer_id = layer_map[(biz_key, layer_key)]
@@ -1354,43 +1317,7 @@ def build_graph(records):
                 }})
             sc_id = service_container_ids[sc_key]
 
-        if project_key is not None:
-            prj_parent = sc_id if sc_id else layer_id
-            prj_id = f"ccep_{group_meta['group_index']}"
-            sample_entry = info[0]
-            sample_data = sample_entry["data"]
-            count = len(info)
-            cce_project_nodes.append({"group": "nodes", "data": {
-                "id":              prj_id,
-                "name":            group_meta["project_label"],
-                "display_label":   group_meta["project_label"],
-                "type":            "__cce_project__",
-                "service_key":     svc_key,
-                "layer_key":       layer_key,
-                "layer_name":      get_topology_layer_name(layer_key),
-                "business":        sample_data.get("business", ""),
-                "business_key":    biz_key,
-                "resource_total":  count,
-                "cce_resources":   [
-                    make_summary_resource(entry) for entry in info
-                ],
-                "cce_business_prefix": sample_data.get("cce_business_prefix", ""),
-                "enterprise_project": group_meta["project_label"],
-                "is_container":    0,
-                "is_summary":      0,
-                "parent":          prj_parent,
-            }})
-            cce_count_nodes.append({"group": "nodes", "data": {
-                "id":              f"ccecnt_{group_meta['group_index']}",
-                "name":            str(count),
-                "type":            "__cce_count__",
-                "anchor":          prj_id,
-                "resource_total":  count,
-                "parent":          prj_parent,
-                "is_container":    0,
-                "is_summary":      0,
-            }})
-        elif sc_id is not None:
+        if sc_id is not None:
             for node_id in rendered_ids:
                 node = node_by_id.get(node_id)
                 if node:
@@ -1398,23 +1325,18 @@ def build_graph(records):
                     node["data"]["service_container"] = sc_id
                     node["data"]["layer_container"] = layer_id
 
-    nodes = (biz_containers + layer_containers + service_containers
-             + cce_project_nodes + cce_count_nodes + nodes)
+    nodes = biz_containers + layer_containers + service_containers + nodes
 
     # ── 3. 创建边 ─────────────────────────────────────────────────────────
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
-        if entry["group_key"] in cce_project_group_keys:
-            return f"ccep_{group_info[entry['group_key']]['group_index']}"
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
         return group_info[entry["group_key"]]["summary_id"]
 
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
-        if entry["group_key"] in cce_project_group_keys:
-            return f"ccep_{group_info[entry['group_key']]['group_index']}"
         if entry["group_key"]:
             return group_info[entry["group_key"]]["first_id"]
         return entry["data"]["id"]
@@ -1563,24 +1485,18 @@ def compute_bdat_positions(elements):
     NODE_W        = 195
     ROW_H         = 105
     SERVICE_GAP   = 90
-    LAYER_GAP     = 145
-    MAX_ROW_NODES = MAX_VISIBLE_SERVICE_NODES
+    LAYER_GAP     = 280
+    MAX_ROW_NODES = MAX_NODES_PER_ROW
     GROUP_PAD     = 110
     GAP_X         = 450
     GAP_Y         = 380
     MAX_COLS      = 4
-    BADGE_OFFSET  = 40
 
     leaf_nodes = {}
-    badge_nodes = {}
     edges_list = []
     for e in elements:
-        if e["group"] == "nodes":
-            data = e["data"]
-            if data.get("type") == "__cce_count__":
-                badge_nodes[data["id"]] = data
-            elif not data.get("is_container"):
-                leaf_nodes[data["id"]] = data
+        if e["group"] == "nodes" and not e["data"].get("is_container"):
+            leaf_nodes[e["data"]["id"]] = e["data"]
         elif e["group"] == "edges":
             edges_list.append((e["data"]["source"], e["data"]["target"]))
 
@@ -1770,16 +1686,6 @@ def compute_bdat_positions(elements):
                         }
                 service_x += block["w"] + SERVICE_GAP
 
-    # 数字徽标跟随其锚点（企业项目聚合节点）并显示在其正上方。
-    for nid, data in badge_nodes.items():
-        anchor_id = data.get("anchor")
-        if anchor_id in positions:
-            pos = positions[anchor_id]
-            positions[nid] = {
-                "x": round(pos["x"], 1),
-                "y": round(pos["y"] - BADGE_OFFSET, 1),
-            }
-
     return positions
 
 
@@ -1890,6 +1796,8 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "font-size": 18,
                 "font-weight": "bold",
                 "color": "#34495E",
+                "text-wrap": "none",
+                "min-width": "300px",
                 "text-valign": "top",
                 "text-background-color": "#fff",
                 "text-background-opacity": 0.92,
@@ -1962,48 +1870,6 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "text-background-padding": "3px",
                 "padding": "20px",
                 "shape": "roundrectangle",
-            }
-        },
-        # CCE_Deployment 企业项目聚合节点：有图标时由图标样式接管（CCE 图标 +
-        # 下方企业项目名）；无图标时使用此回退样式。
-        {
-            "selector": "node[type = '__cce_project__']",
-            "style": {
-                "label": "data(display_label)",
-                "width": 150,
-                "height": 60,
-                "shape": "roundrectangle",
-                "background-color": "#EBF5FB",
-                "background-opacity": 0.16,
-                "border-color": "#2C5F8A",
-                "border-width": 2,
-                "font-size": 14,
-                "font-weight": "bold",
-                "color": "#2C3E50",
-                "text-valign": "center",
-                "text-halign": "center",
-                "text-wrap": "wrap",
-                "text-max-width": "140px",
-            }
-        },
-        # CCE 企业项目数量徽标：红色圆圈 + 红色数字，位于图标上方
-        {
-            "selector": "node[type = '__cce_count__']",
-            "style": {
-                "label": "data(name)",
-                "width": 26,
-                "height": 26,
-                "shape": "ellipse",
-                "background-color": "#FFFFFF",
-                "background-opacity": 1,
-                "border-color": "#E74C3C",
-                "border-width": 2,
-                "font-size": 12,
-                "font-weight": "bold",
-                "color": "#E74C3C",
-                "text-valign": "center",
-                "text-halign": "center",
-                "text-background-opacity": 0,
             }
         },
         # 聚合资源固定显示两行：服务统称 + 截短后的 resource_name
@@ -2214,26 +2080,15 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     # 统计数字
     visible_resources = sum(1 for e in elements if e.get("group") == "nodes"
                             and not e["data"].get("is_container")
-                            and not e["data"].get("is_summary")
-                            and e["data"].get("type")
-                            not in {"__cce_project__", "__cce_count__"})
-    cce_project_nodes = [e for e in elements if e.get("group") == "nodes"
-                         and e["data"].get("type") == "__cce_project__"]
+                            and not e["data"].get("is_summary"))
     summary_nodes = sum(1 for e in elements if e.get("group") == "nodes"
                         and e["data"].get("is_summary"))
     collapsed_resources = sum(e["data"].get("collapsed_count", 0) for e in elements
                               if e.get("group") == "nodes" and e["data"].get("is_summary"))
-    cce_project_total = sum(
-        node["data"].get("resource_total", 0) for node in cce_project_nodes
-    )
-    total_resources = (visible_resources + collapsed_resources
-                       + cce_project_total)
-    resource_stat = (
-        f"{visible_resources + summary_nodes + len(cce_project_nodes)} 可见 / "
-        f"{total_resources} 资源"
-        if (collapsed_resources or cce_project_nodes)
-        else f"{total_resources} 节点"
-    )
+    total_resources = visible_resources + collapsed_resources
+    resource_stat = (f"{visible_resources + summary_nodes} 可见 / "
+                     f"{total_resources} 资源"
+                     if collapsed_resources else f"{total_resources} 节点")
     n_edges = sum(1 for e in elements if e.get("group") == "edges"
                   and not e["data"].get("layer_relation"))
     n_infer = sum(1 for e in elements if e.get("group") == "edges"
@@ -2386,8 +2241,6 @@ cy.on('tap', 'node', function(evt) {{
   var bg = d.bg_color || '#888';
   if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__') {{
     showContainerDetail(d);
-  }} else if (d.type === '__cce_project__' || d.type === '__cce_count__') {{
-    showCceProjectDetail(d);
   }} else if (d.is_summary === 1) {{
     showSummaryDetail(d);
   }} else {{
@@ -2528,8 +2381,7 @@ function showNodeDetail(d, bg) {{
   var nbrs  = src.neighborhood().nodes().filter(function(n) {{
     var t = n.data('type');
     return t !== '__region__' && t !== '__group__' && t !== '__business__' &&
-           t !== '__layer__' && t !== '__service__' && t !== '__cce_project__' &&
-           t !== '__cce_count__';
+           t !== '__layer__' && t !== '__service__';
   }});
   if (nbrs.length > 0) {{
     html += '<div class="d-row"><div class="d-label">相邻节点</div><div class="d-value">';
@@ -2584,52 +2436,6 @@ function showSummaryDetail(d) {{
     '<span class="tag" style="background:#7F8C8D">省略节点</span>';
 }}
 
-function showCceProjectDetail(d) {{
-  if (d.type === '__cce_count__' && d.anchor) {{
-    d = cy.getElementById(d.anchor).data();
-  }}
-  var html = '<div class="d-row"><div class="d-label">企业项目</div>' +
-             '<div class="d-value">'+escHtml(d.name || '-')+'</div></div>' +
-             '<div class="d-row"><div class="d-label">所属业务</div>' +
-             '<div class="d-value">'+escHtml(d.business || '-')+'</div></div>' +
-             '<div class="d-row"><div class="d-label">所属层</div>' +
-             '<div class="d-value">'+escHtml(d.layer_name || '-')+'</div></div>' +
-             '<div class="d-row"><div class="d-label">CCE_Deployment 数量</div>' +
-             '<div class="d-value">'+escHtml(d.resource_total || 0)+'</div></div>';
-  if (d.cce_business_prefix) {{
-    html += '<div class="d-row"><div class="d-label">CCE业务前缀</div>' +
-            '<div class="d-value">'+escHtml(d.cce_business_prefix)+'</div></div>';
-  }}
-  var resources = d.cce_resources || [];
-  if (resources.length > 0) {{
-    html += '<div class="d-row"><div class="d-label">包含节点明细</div><div class="d-value">';
-    resources.forEach(function(item, index) {{
-      var downstream = (item.downstream || []).join(', ') || '-';
-      var inferredDownstream = (item.inferred_downstream || []).join(', ') || '-';
-      html += '<div style="border:1px solid #E5E7EB;border-radius:4px;padding:7px 8px;' +
-              'margin:6px 0;background:#FAFAFA">';
-      html += '<div style="font-weight:700;color:#2C3E50;margin-bottom:5px">' +
-              (index + 1)+'. '+escHtml(item.name || '-')+'</div>';
-      html += '<div><strong>类型：</strong>'+escHtml(item.service_name || item.type || '-')+'</div>';
-      html += '<div><strong>资源ID：</strong>'+escHtml(item.resource_id || '-')+'</div>';
-      html += '<div><strong>项目/业务：</strong>'+escHtml((item.project || '-') + ' / ' + (item.business || '-'))+'</div>';
-      html += '<div><strong>区域：</strong>'+escHtml(item.region || '-')+'</div>';
-      html += '<div><strong>分组：</strong>'+escHtml(item.group || '-')+'</div>';
-      html += '<div><strong>规格：</strong>'+escHtml(item.spec || '-')+'</div>';
-      html += '<div><strong>描述：</strong>'+escHtml(item.desc || '-')+'</div>';
-      html += '<div><strong>下游：</strong>'+escHtml(downstream)+'</div>';
-      if (inferredDownstream !== '-') {{
-        html += '<div><strong>推断下游：</strong>'+escHtml(inferredDownstream)+'</div>';
-      }}
-      html += '</div>';
-    }});
-    html += '</div></div>';
-  }}
-  document.getElementById('detail-panel').innerHTML = html;
-  document.getElementById('node-type-tag').innerHTML =
-    '<span class="tag" style="background:#2C5F8A">CCE_Deployment</span>';
-}}
-
 function showContainerDetail(d) {{
   var label = d.type === '__region__' ? '区域'
             : d.type === '__business__' ? '所属业务'
@@ -2643,7 +2449,7 @@ function showContainerDetail(d) {{
   var html = '<div class="d-row"><div class="d-label">'+label+'</div>' +
              '<div class="d-value">'+escHtml(d.name)+'</div></div>';
   var children = cy.getElementById(d.id).descendants().filter(function(n) {{
-    return !n.data('is_container') && n.data('type') !== '__cce_count__';
+    return !n.data('is_container');
   }});
   var total = d.resource_total || children.filter(function(n) {{ return !n.data('is_summary'); }}).length;
   html += '<div class="d-row"><div class="d-label">包含资源 ('+total+')</div><div class="d-value">';
@@ -2676,10 +2482,6 @@ function exportPng() {{
 
 function changeLayout(name) {{
   var opts;
-  // 数字徽标只在 BDAT 布局下有相对定位，切换其他布局时隐藏，避免散落。
-  cy.nodes('[type = "__cce_count__"]').style(
-    'display', name === 'bdat' ? 'element' : 'none'
-  );
   if (name === 'bdat') {{
     opts = {{
       name: 'preset',
@@ -2776,7 +2578,7 @@ function showToast(msg) {{
 
     size_kb = os.path.getsize(output_path) // 1024
     print(f"已生成: {output_path}  ({size_kb} KB)")
-    print(f"  可见节点: {visible_resources + summary_nodes + len(cce_project_nodes)}")
+    print(f"  可见节点: {visible_resources + summary_nodes}")
     print(f"  资源总数: {total_resources}")
     print(f"  确认连线: {n_edges - n_infer}")
     print(f"  推断连线: {n_infer}")

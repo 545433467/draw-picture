@@ -7,7 +7,7 @@ import openpyxl
 
 from converter import (
     ICON_SIZE,
-    MAX_VISIBLE_SERVICE_NODES,
+    MAX_NODES_PER_ROW,
     _make_cytoscape_style,
     build_graph,
     compute_bdat_positions,
@@ -146,9 +146,9 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
         self.assertFalse(any(node.get("is_summary") for node in nodes))
 
-    def test_five_nodes_stay_on_one_layout_row_without_summary(self):
+    def test_max_nodes_per_row_stay_on_one_layout_row(self):
         records = [make_record(f"cce-node-{i}")
-                   for i in range(1, MAX_VISIBLE_SERVICE_NODES + 1)]
+                   for i in range(1, MAX_NODES_PER_ROW + 1)]
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
@@ -157,7 +157,8 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         self.assertFalse(any(node.get("is_summary") for node in nodes))
         self.assertEqual(len({positions[node_id]["y"] for node_id in resource_ids}), 1)
-        self.assertEqual(len({positions[node_id]["x"] for node_id in resource_ids}), 5)
+        self.assertEqual(len({positions[node_id]["x"] for node_id in resource_ids}),
+                         MAX_NODES_PER_ROW)
 
     def test_records_without_calls_do_not_create_edges(self):
         elements = build_graph([make_record(f"cce-node-{i}") for i in range(1, 8)])
@@ -601,6 +602,24 @@ class BuildGraphAggregationTests(unittest.TestCase):
             "data_middleware_storage",
         )
 
+    def test_topology_layer_names_use_new_text_without_prefix(self):
+        self.assertEqual(
+            converter.get_topology_layer_name("access"),
+            "渠道接入与安全边界",
+        )
+        self.assertEqual(
+            converter.get_topology_layer_name("network_lb"),
+            "网络与负载均衡层",
+        )
+        self.assertEqual(
+            converter.get_topology_layer_name("compute_app"),
+            "计算、容器与应用服务层",
+        )
+        self.assertEqual(
+            converter.get_topology_layer_name("data_middleware_storage"),
+            "中间件、数据与存储层",
+        )
+
     def test_bdat_business_grid_uses_four_columns(self):
         records = [
             make_record(f"ecs-{i}", business=f"业务{i}", service_type="ecs",
@@ -620,7 +639,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(len({pos["x"] for pos in ordered_positions[:4]}), 4)
         self.assertGreater(ordered_positions[4]["y"], ordered_positions[0]["y"])
 
-    def test_cce_deployment_renders_one_project_node_per_project(self):
+    def test_cce_deployment_nodes_are_drawn_individually(self):
         records = [
             make_record("bj-prod-app-deploy-1", service_type="cce",
                         group="CCE_Deployment", enterprise_id="ep-A"),
@@ -632,66 +651,22 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        projects = [node for node in nodes if node.get("type") == "__cce_project__"]
-        badges = [node for node in nodes if node.get("type") == "__cce_count__"]
         cce_leaves = [
             node for node in nodes
             if node.get("service_key") == "cce"
             and not node.get("is_container") and not node.get("is_summary")
-            and node.get("type") != "__cce_project__"
         ]
 
-        # 每个企业项目只有一个聚合节点，名字为企业项目
-        self.assertEqual({node["name"] for node in projects}, {"ep-A", "ep-B"})
-        self.assertEqual({node["resource_total"] for node in projects}, {1, 2})
-        self.assertEqual(len(badges), 2)
-        self.assertEqual({node["name"] for node in badges}, {"1", "2"})
-        # 聚合节点带 cce 服务键以便读取 CCE_Deployment.png 图标，
-        # 名称为企业项目名（数字由独立徽标承载）。
-        self.assertTrue(all(node["service_key"] == "cce" for node in projects))
-        self.assertTrue(all(
-            node["display_label"] == node["name"]
-            for node in projects
-        ))
-        self.assertTrue(all(
-            node.get("anchor") in {p["id"] for p in projects}
-            for node in badges
-        ))
-        # 不再渲染任何单个 CCE_Deployment 节点
-        self.assertEqual(cce_leaves, [])
-
-    def test_cce_project_node_count_badge_and_no_summary(self):
-        records = [
-            make_record(f"bj-prod-app-deploy-{i}", service_type="cce",
-                        group="CCE_Deployment", enterprise_id="ep-A")
-            for i in range(8)
-        ]
-        records.extend(
-            make_record(f"bj4-prod-app-deploy-{i}", service_type="cce",
-                        group="CCE_Deployment", enterprise_id="ep-B")
-            for i in range(3)
-        )
-
-        elements = build_graph(records)
-        nodes = element_data(elements, "nodes")
-        projects = [node for node in nodes if node.get("type") == "__cce_project__"]
-        project_by_name = {node["name"]: node for node in projects}
-        ep_a = project_by_name["ep-A"]
-        badges = [node for node in nodes if node.get("type") == "__cce_count__"]
-        ep_a_badge = next(
-            node for node in badges if node.get("anchor") == ep_a["id"]
-        )
-
-        self.assertEqual(ep_a["resource_total"], 8)
-        self.assertEqual(ep_a["display_label"], "ep-A")
-        self.assertEqual(ep_a["service_key"], "cce")
-        self.assertEqual(ep_a_badge["name"], "8")
-        self.assertEqual(ep_a_badge["resource_total"], 8)
-        self.assertEqual(project_by_name["ep-B"]["resource_total"], 3)
-        # CCE 组不再生成摘要节点
+        # CCE_Deployment 不再聚合/缩略，全部按普通节点绘制
+        self.assertEqual({node["name"] for node in cce_leaves},
+                         {"bj-prod-app-deploy-1", "bj-prod-app-deploy-2",
+                          "bj4-prod-app-deploy-1"})
+        self.assertFalse(any(node.get("type") in {"__cce_project__",
+                                                  "__cce_count__"}
+                             for node in nodes))
         self.assertFalse(any(node.get("is_summary") for node in nodes))
 
-    def test_cce_deployment_without_business_stays_in_compute_layer(self):
+    def test_cce_deployment_without_business_stays_in_virtual_business(self):
         records = [
             make_record("bj-prod-app-deploy-1", business="", service_type="cce",
                         group="CCE_Deployment", enterprise_id="ep-A"),
@@ -701,16 +676,17 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        node_by_id = {node["id"]: node for node in nodes}
         business = next(node for node in nodes if node.get("type") == "__business__")
-        layers = [node for node in nodes if node.get("type") == "__layer__"]
-        projects = [node for node in nodes if node.get("type") == "__cce_project__"]
+        leaves = [
+            node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        ]
 
+        self.assertEqual(business["name"], "CCE")
         self.assertEqual(business["is_virtual_business"], 1)
-        self.assertTrue(layers)
-        self.assertEqual({node["layer_key"] for node in layers}, {"compute_app"})
-        self.assertTrue(all(node_by_id[node["parent"]]["type"] == "__layer__"
-                            for node in projects))
+        self.assertEqual(len(leaves), 2)
+        self.assertTrue(all(node.get("parent") == business["id"]
+                            for node in leaves))
 
     def test_cce_deployment_without_business_falls_back_to_project_business(self):
         records = [
@@ -725,17 +701,14 @@ class BuildGraphAggregationTests(unittest.TestCase):
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
         businesses = [node for node in nodes if node.get("type") == "__business__"]
-        projects = [node for node in nodes if node.get("type") == "__cce_project__"]
-        ep_a = [node for node in projects if node["name"] == "ep-A"]
-        ep_z = [node for node in projects if node["name"] == "ep-Z"]
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
 
         self.assertEqual({node["name"] for node in businesses}, {"业务A", "CCE"})
-        # 无业务节点按同项目+同前缀并入业务A，ep-A 只有一个聚合节点
-        self.assertEqual(len(ep_a), 1)
-        self.assertEqual(ep_a[0]["business"], "业务A")
-        self.assertEqual(ep_a[0]["resource_total"], 2)
-        self.assertEqual(len(ep_z), 1)
-        self.assertEqual(ep_z[0]["business"], "CCE")
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-2"]["business"], "业务A")
+        self.assertEqual(leaf_by_name["gz-prod-app-deploy-1"]["business"], "CCE")
 
     def test_cce_fallback_requires_same_prefix(self):
         records = [
@@ -747,13 +720,14 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        ep_a = [node for node in nodes
-                if node.get("type") == "__cce_project__" and node["name"] == "ep-A"]
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
 
         # 企业项目相同但前缀不同（bj4-prod-app ≠ bj-prod-app），不合并，
-        # 生成两个独立的 ep-A 聚合节点：业务A 与 虚拟CCE 各一个。
-        self.assertEqual(len(ep_a), 2)
-        self.assertEqual({node["business"] for node in ep_a}, {"业务A", "CCE"})
+        # 无业务节点留在虚拟 CCE 业务。
+        self.assertEqual(leaf_by_name["bj4-prod-app-deploy-1"]["business"], "CCE")
 
     def test_cce_fallback_prefers_business_with_more_same_prefix_nodes(self):
         records = [
@@ -769,13 +743,13 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        ep_a = [node for node in nodes
-                if node.get("type") == "__cce_project__" and node["name"] == "ep-A"]
-        by_business = {node["business"]: node for node in ep_a}
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
 
         # 业务A 有 2 个同前缀节点，业务B 只有 1 个 → 无业务节点并入业务A。
-        self.assertEqual(by_business["业务A"]["resource_total"], 3)
-        self.assertEqual(by_business["业务B"]["resource_total"], 1)
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-3"]["business"], "业务A")
 
     def test_cce_prefix_uses_three_segments_by_default(self):
         self.assertEqual(
@@ -783,7 +757,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
             "bj-prod-app",
         )
 
-    def test_cce_project_node_uses_enterprise_project_name_field(self):
+    def test_cce_deployment_keeps_enterprise_project_field(self):
         records = [
             make_record("bj-prod-app-deploy-1", service_type="cce",
                         group="CCE_Deployment", enterprise_id="ep-id-1",
@@ -798,14 +772,17 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        projects = [node for node in nodes if node.get("type") == "__cce_project__"]
+        leaf_by_name = {
+            node["name"]: node for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+        }
 
-        # 节点名取“企业项目”字段，而非 enterprise_project_id
-        self.assertEqual({node["name"] for node in projects},
-                         {"生产项目", "测试项目"})
-        # 中文项目名不会因 ID 归一化而冲突
-        self.assertEqual(len({node["id"] for node in projects}), 2)
-        self.assertEqual({node["resource_total"] for node in projects}, {1, 2})
+        self.assertEqual(leaf_by_name["bj-prod-app-deploy-1"]["enterprise_project"],
+                         "生产项目")
+        self.assertEqual(
+            leaf_by_name["bj-prod-app-deploy-1"]["enterprise_project_name"],
+            "生产项目",
+        )
 
     def test_core_business_only_nodes_are_drawn(self):
         records = [
@@ -857,7 +834,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         # 被过滤节点不生成外部节点，也不产生连线
         self.assertEqual(edges, [])
 
-    def test_cce_aggregate_counts_only_core_deployments(self):
+    def test_cce_core_filter_draws_only_core_deployments(self):
         records = [
             make_record("bj-prod-app-deploy-1", service_type="cce",
                         group="CCE_Deployment", enterprise_id="ep-A",
@@ -875,12 +852,15 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        projects = [node for node in nodes if node.get("type") == "__cce_project__"]
-        project_by_name = {node["name"]: node for node in projects}
+        leaves = [
+            node["name"] for node in nodes
+            if node.get("service_key") == "cce"
+            and not node.get("is_container") and not node.get("is_summary")
+        ]
 
-        # ep-A 只有 2 个核心部署；ep-B 无核心部署，不生成聚合节点
-        self.assertEqual(set(project_by_name), {"ep-A"})
-        self.assertEqual(project_by_name["ep-A"]["resource_total"], 2)
+        # 只绘制核心部署：ep-A 的 2 个是核心，ep-B 的 1 个不是
+        self.assertEqual(leaves,
+                         ["bj-prod-app-deploy-1", "bj-prod-app-deploy-2"])
 
     def test_read_excel_detects_enterprise_project_name_column(self):
         wb = openpyxl.Workbook()
