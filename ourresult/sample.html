@@ -229,11 +229,15 @@ cy.on('tap', 'node', function(evt) {
       chain = chain.closedNeighborhood();
     }
     chain.edges().removeClass('faded');
-    chain.nodes().filter(function(n) {
+    var chainNodes = chain.nodes().filter(function(n) {
       var t = n.data('type');
       return t !== '__region__' && t !== '__group__' && t !== '__business__' &&
              t !== '__layer__' && t !== '__service__';
-    }).removeClass('faded').addClass('highlighted');
+    });
+    chainNodes.removeClass('faded').addClass('highlighted');
+    // 父容器（业务/层/服务框）也取消淡化：cytoscape 渲染复合父节点时会把
+    // 父级透明度作用于子节点，否则链路节点的图标和名称仍会被父框压暗。
+    chainNodes.ancestors().removeClass('faded');
   } else {
     evt.target.neighborhood().removeClass('faded');
   }
