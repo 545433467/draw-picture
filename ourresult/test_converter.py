@@ -231,9 +231,9 @@ class BuildGraphAggregationTests(unittest.TestCase):
                 if item["selector"] == selector
             )
 
-        self.assertEqual(font_size("node[type = '__service__']"), 18)
-        self.assertEqual(font_size("node[type = '__layer__']"), 18)
-        self.assertEqual(font_size("node[type = '__business__']"), 22)
+        self.assertEqual(font_size("node[type = '__service__']"), 22)
+        self.assertEqual(font_size("node[type = '__layer__']"), 22)
+        self.assertEqual(font_size("node[type = '__business__']"), 26)
 
     def test_layer_relation_edges_connect_consecutive_layers(self):
         records = [

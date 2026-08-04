@@ -1124,6 +1124,9 @@ def build_graph(records):
             "resource_id": d.get("resource_id", ""),
             "spec": d.get("spec", ""),
             "project": d.get("enterprise_id", ""),
+            "enterprise_project": (
+                d.get("enterprise_project") or d.get("enterprise_id", "")
+            ),
             "business": d.get("business", ""),
             "group": d.get("group_label", ""),
             "source": d.get("source") or d.get("region", ""),
@@ -1751,7 +1754,7 @@ def _make_cytoscape_style(icon_data_uris=None):
             "style": {
                 "label": "data(name)",
                 "text-valign": "top",
-                "font-size": 16,
+                "font-size": 20,
                 "font-weight": "bold",
                 "background-opacity": 0.06,
                 "border-style": "dashed",
@@ -1770,7 +1773,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-width": 3,
                 "background-color": "#EBF5FB",
                 "background-opacity": 0.12,
-                "font-size": 24,
+                "font-size": 28,
                 "font-weight": "bold",
             }
         },
@@ -1782,7 +1785,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-width": 1,
                 "background-color": "#FDFEFE",
                 "background-opacity": 0.08,
-                "font-size": 18,
+                "font-size": 22,
             }
         },
         {
@@ -1793,7 +1796,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "dashed",
                 "background-color": "#F7F9FC",
                 "background-opacity": 0.34,
-                "font-size": 18,
+                "font-size": 22,
                 "font-weight": "bold",
                 "color": "#34495E",
                 "text-wrap": "none",
@@ -1861,7 +1864,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "dashed",
                 "background-color": "#F8F9FA",
                 "background-opacity": 0.55,
-                "font-size": 18,
+                "font-size": 22,
                 "font-weight": "bold",
                 "color": "#2C3E50",
                 "text-valign": "top",
@@ -1946,7 +1949,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "solid",
                 "background-color": "data(bg_color)",
                 "background-opacity": 0.28,
-                "font-size": 22,
+                "font-size": 26,
                 "font-weight": "bold",
                 "color": "data(text_color)",
                 "text-background-color": "#fff",
@@ -1977,7 +1980,7 @@ def _make_cytoscape_style(icon_data_uris=None):
         {
             "selector": "edge[layer_relation = 1]",
             "style": {
-                "label": "data(relation)",
+                "label": "",
                 "width": 6,
                 "line-color": "#5D6D7E",
                 "line-style": "solid",
@@ -2157,6 +2160,36 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 #toast{{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
   background:#333;color:#fff;padding:8px 20px;border-radius:20px;
   font-size:12px;opacity:0;transition:opacity .3s;pointer-events:none;z-index:9999}}
+/* ── 右侧滑出明细抽屉（折叠资源表格） ── */
+#drawer-backdrop{{position:fixed;top:50px;left:0;right:0;bottom:0;
+  background:rgba(0,0,0,.28);opacity:0;pointer-events:none;
+  transition:opacity .25s;z-index:90}}
+#drawer-backdrop.open{{opacity:1;pointer-events:auto}}
+#summary-drawer{{position:fixed;top:50px;right:0;bottom:0;
+  width:min(76vw,1250px);background:#fff;
+  box-shadow:-4px 0 18px rgba(0,0,0,.28);
+  transform:translateX(105%);transition:transform .28s ease;
+  z-index:100;display:flex;flex-direction:column}}
+#summary-drawer.open{{transform:translateX(0)}}
+#drawer-header{{display:flex;justify-content:space-between;align-items:center;
+  padding:10px 16px;background:#283593;color:#fff;font-weight:700;
+  font-size:15px;flex-shrink:0}}
+#drawer-body{{flex:1;overflow:auto;padding:14px 16px}}
+.sum-table{{border-collapse:collapse;width:100%;table-layout:auto;
+  white-space:nowrap;font-size:13px}}
+.sum-table th,.sum-table td{{border:1px solid #d5d8dc;padding:8px 12px;
+  text-align:left;vertical-align:top;overflow-wrap:normal}}
+.sum-table thead th{{background:#E8EAF6;color:#283593;position:sticky;top:0;
+  z-index:1}}
+.sum-table tbody tr{{background:transparent}}
+.sum-table tbody tr:hover{{background:#F4F6F7}}
+.sum-pager{{display:flex;gap:10px;align-items:center;padding:12px 2px;
+  font-size:13px;color:#555}}
+.sum-pager .pg-btn{{cursor:pointer;padding:4px 14px;border:1px solid #9AA7B8;
+  border-radius:4px;background:#fff;color:#283593}}
+.sum-pager .pg-btn:hover{{background:#E8EAF6}}
+.sum-pager .pg-btn:disabled{{opacity:.4;cursor:not-allowed}}
+.sum-hint{{font-size:12px;color:#888;margin:0 0 8px 2px}}
 </style>
 </head>
 <body>
@@ -2209,6 +2242,14 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   </div>
 </div>
 <div id="toast"></div>
+<div id="drawer-backdrop"></div>
+<div id="summary-drawer">
+  <div id="drawer-header">
+    <span id="drawer-title">折叠资源明细</span>
+    <button class="tb-btn" onclick="closeSummaryDrawer()">&#10005; 关闭</button>
+  </div>
+  <div id="drawer-body"></div>
+</div>
 
 <script>{cytoscape_js}</script>
 <script>
@@ -2398,43 +2439,99 @@ function showNodeDetail(d, bg) {{
     '<span class="tag" style="background:'+bg+'">'+((d.type||'').toUpperCase())+'</span>';
 }}
 
-function showSummaryDetail(d) {{
-  var rows = [
-    ['服务类型', d.service_name || d.service_key || '-'],
-    ['所属层', d.layer_name || '-'],
-    ['所属业务', d.business || '-'],
-    ['省略节点', d.collapsed_count || 0],
-    ['资源总数', d.resource_total || 0],
-  ];
-  var html = rows.map(function(r) {{
-    return '<div class="d-row"><div class="d-label">'+r[0]+'</div>' +
-           '<div class="d-value">'+escHtml(r[1])+'</div></div>';
-  }}).join('');
-  var resources = d.summary_resources || [];
-  if (resources.length > 0) {{
-    html += '<div class="d-row"><div class="d-label">折叠资源明细</div><div class="d-value">';
-    resources.forEach(function(item, index) {{
-      var downstream = (item.downstream || []).join(', ') || '-';
-      var inferredDownstream = (item.inferred_downstream || []).join(', ') || '-';
-      html += '<div style="border:1px solid #E5E7EB;border-radius:4px;padding:7px 8px;margin:6px 0;background:#FAFAFA">';
-      html += '<div style="font-weight:700;color:#2C3E50;margin-bottom:5px">'+(index + 1)+'. '+escHtml(item.name || '-')+'</div>';
-      html += '<div><strong>类型：</strong>'+escHtml(item.service_name || item.type || '-')+'</div>';
-      html += '<div><strong>类型说明：</strong>'+escHtml(item.desc || '-')+'</div>';
-      html += '<div><strong>项目/业务：</strong>'+escHtml((item.project || '-') + ' / ' + (item.business || '-'))+'</div>';
-      html += '<div><strong>分组：</strong>'+escHtml(item.group || '-')+'</div>';
-      html += '<div><strong>来源：</strong>'+escHtml(item.source || '-')+'</div>';
-      html += '<div><strong>下游：</strong>'+escHtml(downstream)+'</div>';
-      if (inferredDownstream !== '-') {{
-        html += '<div><strong>推断下游：</strong>'+escHtml(inferredDownstream)+'</div>';
-      }}
-      html += '</div>';
-    }});
-    html += '</div></div>';
-  }}
-  document.getElementById('detail-panel').innerHTML = html;
-  document.getElementById('node-type-tag').innerHTML =
-    '<span class="tag" style="background:#7F8C8D">省略节点</span>';
+// ── 折叠资源明细：右侧滑出 xlsx 样式表格 ────────────────────────────────────
+var SUMMARY_PAGE_SIZE = 10;
+var SUMMARY_COLUMNS = [
+  ['region', '区域'],
+  ['name', '资源名称'],
+  ['type', '资源类型'],
+  ['ep', '企业项目'],
+  ['business', '所属业务'],
+  ['group', '资源分组'],
+  ['downstream', '下游服务'],
+];
+
+function summaryRow(item) {{
+  return {{
+    region: item.region || '-',
+    name: item.name || '-',
+    type: item.type || item.service_name || '-',
+    ep: item.enterprise_project || item.project || '-',
+    business: item.business || '-',
+    group: item.group || '-',
+    downstream: (item.downstream || []).join(', ') || '-',
+  }};
 }}
+
+function showSummaryDetail(d) {{
+  var drawer = document.getElementById('summary-drawer');
+  drawer._resources = d.summary_resources || [];
+  drawer._page = 0;
+  document.getElementById('drawer-title').textContent =
+    '折叠资源明细（' + (d.business || '-') + ' / ' +
+    (d.service_name || d.service_key || '-') + '，共 ' +
+    drawer._resources.length + ' 个节点）';
+  renderSummaryTable();
+  drawer.classList.add('open');
+  document.getElementById('drawer-backdrop').classList.add('open');
+}}
+
+function renderSummaryTable() {{
+  var drawer = document.getElementById('summary-drawer');
+  var resources = drawer._resources || [];
+  var pageSize = SUMMARY_PAGE_SIZE;
+  var pages = Math.max(1, Math.ceil(resources.length / pageSize));
+  var page = Math.min(Math.max(drawer._page || 0, 0), pages - 1);
+  drawer._page = page;
+  var start = page * pageSize;
+  var pageItems = resources.slice(start, start + pageSize);
+
+  var html = '<div class="sum-hint">共 ' + resources.length +
+             ' 个节点，每页 ' + pageSize + ' 条；表格可左右拖动查看完整内容。</div>';
+  html += '<table class="sum-table"><thead><tr>';
+  SUMMARY_COLUMNS.forEach(function(col) {{
+    html += '<th>' + escHtml(col[1]) + '</th>';
+  }});
+  html += '</tr></thead><tbody>';
+  pageItems.forEach(function(item) {{
+    var row = summaryRow(item);
+    html += '<tr>';
+    SUMMARY_COLUMNS.forEach(function(col) {{
+      html += '<td>' + escHtml(row[col[0]]) + '</td>';
+    }});
+    html += '</tr>';
+  }});
+  if (pageItems.length === 0) {{
+    html += '<tr><td colspan="' + SUMMARY_COLUMNS.length +
+            '" style="text-align:center;color:#999">暂无数据</td></tr>';
+  }}
+  html += '</tbody></table>';
+  html += '<div class="sum-pager">' +
+          '<button class="pg-btn" ' + (page === 0 ? 'disabled' : '') +
+          ' onclick="summaryPage(-1)">&#9664; 上一页</button>' +
+          '<span>第 ' + (page + 1) + ' / ' + pages + ' 页</span>' +
+          '<button class="pg-btn" ' + (page >= pages - 1 ? 'disabled' : '') +
+          ' onclick="summaryPage(1)">下一页 &#9654;</button>' +
+          '</div>';
+  document.getElementById('drawer-body').innerHTML = html;
+}}
+
+function summaryPage(delta) {{
+  var drawer = document.getElementById('summary-drawer');
+  var pages = Math.max(1, Math.ceil((drawer._resources || []).length /
+                                    SUMMARY_PAGE_SIZE));
+  var next = Math.min(Math.max((drawer._page || 0) + delta, 0), pages - 1);
+  drawer._page = next;
+  renderSummaryTable();
+}}
+
+function closeSummaryDrawer() {{
+  document.getElementById('summary-drawer').classList.remove('open');
+  document.getElementById('drawer-backdrop').classList.remove('open');
+}}
+
+document.getElementById('drawer-backdrop').addEventListener('click',
+  closeSummaryDrawer);
 
 function showContainerDetail(d) {{
   var label = d.type === '__region__' ? '区域'
