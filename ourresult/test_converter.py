@@ -64,9 +64,9 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         label_lines = node["display_label"].splitlines()
         self.assertEqual(label_lines[0], "ECS")
-        self.assertEqual(len(label_lines), 2)
-        # 资源名称完整显示，不做“...”缩写
-        self.assertEqual(label_lines[1], long_name)
+        # 资源名称完整显示并折成多行，不做“...”缩写
+        self.assertGreaterEqual(len(label_lines), 3)
+        self.assertEqual("".join(label_lines[1:]), long_name)
         self.assertEqual(node["name"], long_name)
 
         custom_elements = build_graph([
@@ -616,7 +616,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         rds_y = [positions[node["id"]]["y"] for node in rds_nodes]
         self.assertTrue(max(ecs_y) < min(rds_y) or max(rds_y) < min(ecs_y))
 
-    def test_services_in_same_layer_are_laid_out_in_grid(self):
+    def test_services_in_same_layer_are_laid_out_on_one_row(self):
         records = [
             make_record("ecs-rabbitmq-1", service_type="ecs"),
             make_record("rds-main", service_type="rds"),
@@ -635,13 +635,10 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertTrue(all(nodes[name]["layer_key"] == "data_middleware_storage"
                             for name in names))
         ys = [positions[nodes[name]["id"]]["y"] for name in names]
-        # 每行最多 3 个服务，4 个服务排成 3 + 1 两行
-        self.assertEqual(len(set(ys)), 2)
-        row1 = [y for y in ys if y == min(ys)]
-        row2 = [y for y in ys if y == max(ys)]
-        self.assertEqual(len(row1), 3)
-        self.assertEqual(len(row2), 1)
-        self.assertLess(max(row1), min(row2))
+        # 同一层内服务保持一行排开，互不重叠
+        self.assertEqual(len(set(ys)), 1)
+        xs = [positions[nodes[name]["id"]]["x"] for name in names]
+        self.assertEqual(len(set(xs)), 4)
 
     def test_read_excel_keeps_rows_even_when_core_column_exists(self):
         wb = openpyxl.Workbook()

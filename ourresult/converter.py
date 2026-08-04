@@ -372,10 +372,28 @@ def compact_resource_name(name, max_units=26):
     return text
 
 
+def wrap_display_name(name, max_units=18):
+    """按近似显示宽度把长名称折成多行（显式插入换行），避免一行溢出重叠。"""
+    lines = []
+    current = []
+    units = 0
+    for char in str(name or ""):
+        char_units = 1 if ord(char) < 128 else 2
+        if units + char_units > max_units and current:
+            lines.append("".join(current))
+            current = []
+            units = 0
+        current.append(char)
+        units += char_units
+    if current:
+        lines.append("".join(current))
+    return "\n".join(lines) if lines else ""
+
+
 def make_node_display_label(name, service_key):
     """节点框固定显示两行：服务统称 + resource_name。"""
     service_name = compact_resource_name(get_service_display_name(service_key))
-    return f"{service_name}\n{name}"
+    return f"{service_name}\n{wrap_display_name(name)}"
 
 
 def container_min_width(text, font_size=22, padding=48):
@@ -1619,13 +1637,13 @@ def compute_bdat_positions(elements):
     - 同一服务块内按“资源分组”再拆成独立小方块，块与块之间留有间隔
     返回 {node_id: {'x': float, 'y': float}}
     """
-    NODE_W        = 195
-    ROW_H         = 125
-    SERVICE_GAP   = 150
-    GROUP_GAP     = 240
-    SERVICES_PER_ROW = 3
-    SERVICE_ROW_GAP = 180
-    LAYER_GAP     = 280
+    NODE_W        = 210
+    ROW_H         = 140
+    SERVICE_GAP   = 220
+    GROUP_GAP     = 320
+    SERVICES_PER_ROW = 100
+    SERVICE_ROW_GAP = 260
+    LAYER_GAP     = 420
     MAX_ROW_NODES = MAX_NODES_PER_ROW
     GROUP_PAD     = 110
     GAP_X         = 450
