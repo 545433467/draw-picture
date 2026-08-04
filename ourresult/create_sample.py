@@ -20,7 +20,7 @@ def create_sample():
     headers = [
         "region", "resource name", "resource id", "resource_type",
         "enterprise_project_id", "企业项目", "资源分组", "所属业务",
-        "下游服务", "下游服务(推断)", "推断原因",
+        "是否核心业务", "下游服务", "下游服务(推断)", "推断原因",
     ]
 
     hfill  = PatternFill("solid", fgColor="1A237E")
@@ -57,9 +57,10 @@ def create_sample():
     def make_row(name, rtype, group, biz, region=None, down="",
                  inferred="", reason=""):
         proj_name, proj_id = pick_project()
+        is_core = "是" if random.random() < 0.5 else "否"
         return [
             region or random.choice(regions), name, f"id-{name}", rtype,
-            proj_id, proj_name, group, biz, down, inferred, reason,
+            proj_id, proj_name, group, biz, is_core, down, inferred, reason,
         ]
 
     rows = []
@@ -182,7 +183,7 @@ def create_sample():
             c.alignment = Alignment(vertical="top", wrap_text=(col >= 9))
         ws.row_dimensions[i].height = 40 if row_data[9] or row_data[10] else 20
 
-    widths = [12, 24, 20, 14, 18, 12, 14, 12, 42, 30, 50]
+    widths = [12, 24, 20, 14, 18, 12, 14, 12, 14, 42, 30, 50]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -198,6 +199,7 @@ def create_sample():
         ["企业项目",               "否",   "企业项目名称（CCE_Deployment 聚合节点名）",     "生产项目"],
         ["资源分组",               "否",   "功能分组标签（CCE_Deployment 触发聚合）",       "CCE_Deployment"],
         ["所属业务",               "否",   "业务分组依据",                                 "订单业务"],
+        ["是否核心业务",           "否",   "仅“是”的节点会绘制（存在该列时生效）",          "是"],
         ["下游服务",               "否",   "已确认下游服务，逗号分隔（值为 resource name）", "rds-order-master,dcs-order-redis-01"],
         ["下游服务(推断)",         "否",   "推断的下游服务，逗号分隔（显示为虚线）",        "apig-order-01"],
         ["推断原因",               "否",   "推断依据（详细描述分析过程）",                  "配置文件中 DB_HOST 指向…"],

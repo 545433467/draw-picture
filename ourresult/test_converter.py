@@ -19,7 +19,7 @@ from converter import (
 
 def make_record(name, business="业务A", service_type="cce_deploym", targets="",
                 inferred_targets="", reason="", source="", enterprise_id="",
-                enterprise_project="", group=""):
+                enterprise_project="", group="", is_core_business=None):
     return {
         "name": name,
         "type": service_type,
@@ -29,6 +29,7 @@ def make_record(name, business="业务A", service_type="cce_deploym", targets=""
         "region": "cn-test-1",
         "group": group,
         "business": business,
+        "is_core_business": is_core_business,
         "desc": "",
         "spec": "",
         "source": source,
@@ -750,6 +751,77 @@ class BuildGraphAggregationTests(unittest.TestCase):
         # 中文项目名不会因 ID 归一化而冲突
         self.assertEqual(len({node["id"] for node in projects}), 2)
         self.assertEqual({node["resource_total"] for node in projects}, {1, 2})
+
+    def test_core_business_only_nodes_are_drawn(self):
+        records = [
+            make_record("ecs-core-1", service_type="ecs", is_core_business="是"),
+            make_record("ecs-core-2", service_type="ecs", is_core_business="是"),
+            make_record("rds-non-core", service_type="rds", is_core_business="否"),
+            make_record("obs-empty-core", service_type="obs", is_core_business=""),
+            make_record("elb-no-flag", service_type="elb", is_core_business=None),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        leaves = [
+            node["name"] for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+            and node.get("type") != "__cce_count__"
+        ]
+
+        # 存在“是否核心业务”列时，只有“是”的节点被绘制；
+        # 无该列标记的行（None）等同于不存在该列，不参与。
+        self.assertIn("ecs-core-1", leaves)
+        self.assertIn("ecs-core-2", leaves)
+        self.assertNotIn("rds-non-core", leaves)
+        self.assertNotIn("obs-empty-core", leaves)
+        self.assertNotIn("elb-no-flag", leaves)
+
+    def test_core_filter_drops_edges_and_external_nodes_for_filtered_names(self):
+        records = [
+            make_record("ecs-core-1", service_type="ecs", is_core_business="是",
+                        targets="rds-non-core,elb-no-flag"),
+            make_record("rds-non-core", service_type="rds", is_core_business="否"),
+            make_record("elb-no-flag", service_type="elb", is_core_business=None),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        edges = element_data(elements, "edges")
+        leaf_names = {
+            node["name"] for node in nodes
+            if not node.get("is_container") and not node.get("is_summary")
+            and node.get("type") != "__cce_count__"
+        }
+
+        self.assertEqual(leaf_names, {"ecs-core-1"})
+        # 被过滤节点不生成外部节点，也不产生连线
+        self.assertEqual(edges, [])
+
+    def test_cce_aggregate_counts_only_core_deployments(self):
+        records = [
+            make_record("bj-prod-app-deploy-1", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A",
+                        is_core_business="是"),
+            make_record("bj-prod-app-deploy-2", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A",
+                        is_core_business="是"),
+            make_record("bj-prod-app-deploy-3", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A",
+                        is_core_business="否"),
+            make_record("bj4-prod-app-deploy-1", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-B",
+                        is_core_business="否"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        projects = [node for node in nodes if node.get("type") == "__cce_project__"]
+        project_by_name = {node["name"]: node for node in projects}
+
+        # ep-A 只有 2 个核心部署；ep-B 无核心部署，不生成聚合节点
+        self.assertEqual(set(project_by_name), {"ep-A"})
+        self.assertEqual(project_by_name["ep-A"]["resource_total"], 2)
 
     def test_read_excel_detects_enterprise_project_name_column(self):
         wb = openpyxl.Workbook()

@@ -578,6 +578,7 @@ def read_excel(filepath):
               f"{[c.value for c in header_row if c.value]}")
         sys.exit("请检查 Excel 表头是否匹配（见 README.md）")
 
+    has_core_col = "是否核心业务" in col_map
     records = []
     for row in rows_iter:
         def get(field, default=""):
@@ -606,7 +607,9 @@ def read_excel(filepath):
             "targets":         get("下游服务"),
             "inferred_targets":get("下游服务推断"),
             "reason":          get("推断原因"),
-            "is_core_business": get("是否核心业务"),
+            "is_core_business": (
+                get("是否核心业务") if has_core_col else None
+            ),
         })
 
     return records
@@ -621,6 +624,24 @@ def build_graph(records):
         return re.sub(r"[^a-zA-Z0-9_\-]", "_", str(s))
 
     records = list(records)
+
+    # 核心业务过滤：只要表里存在“是否核心业务”列，仅保留值为“是”的节点；
+    # 被过滤掉的节点不出现在图中，对它们的引用也不会生成外部节点。
+    def _name_key(name):
+        return str(name or "").strip().casefold()
+
+    core_column_present = any(
+        r.get("is_core_business") is not None for r in records
+    )
+    filtered_names = set()
+    if core_column_present:
+        for r in records:
+            if (r.get("is_core_business") or "").strip() != "是":
+                filtered_names.add(_name_key(r["name"]))
+        records = [
+            r for r in records if _name_key(r["name"]) not in filtered_names
+        ]
+
     nodes = []
     edges = []
     edge_lookup = {}
@@ -986,6 +1007,8 @@ def build_graph(records):
 
     for source_entry in real_entries:
         for target_name in split_target_names(source_entry["record"]["targets"]):
+            if _name_key(target_name) in filtered_names:
+                continue
             if resolve_target_entry(source_entry, target_name,
                                     real_entries, real_name_map):
                 continue
@@ -993,10 +1016,14 @@ def build_graph(records):
 
         for target_name in split_target_names(
                 source_entry["record"]["inferred_targets"]):
+            if _name_key(target_name) in filtered_names:
+                continue
             if resolve_inferred_target_entry(
                     source_entry, target_name, real_entries, real_name_map):
                 continue
             reference = parse_inferred_reference(target_name)
+            if _name_key(reference["target_name"]) in filtered_names:
+                continue
             # 服务类型-业务名是对现有服务组的引用，找不到时不创建伪资源。
             if reference["kind"] in {"business_service", "service_marker"}:
                 continue
