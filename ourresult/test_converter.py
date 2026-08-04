@@ -53,7 +53,7 @@ def call_edges(elements):
 
 
 class BuildGraphAggregationTests(unittest.TestCase):
-    def test_long_resource_name_uses_two_line_compact_label(self):
+    def test_long_resource_name_uses_two_line_full_label(self):
         long_name = "ecs-production-payment-service-with-a-very-long-instance-name"
 
         elements = build_graph([
@@ -65,7 +65,8 @@ class BuildGraphAggregationTests(unittest.TestCase):
         label_lines = node["display_label"].splitlines()
         self.assertEqual(label_lines[0], "ECS")
         self.assertEqual(len(label_lines), 2)
-        self.assertTrue(label_lines[1].endswith("..."))
+        # 资源名称完整显示，不做“...”缩写
+        self.assertEqual(label_lines[1], long_name)
         self.assertEqual(node["name"], long_name)
 
         custom_elements = build_graph([
@@ -306,6 +307,30 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertFalse(any(node.get("type") == "__group__" for node in nodes))
         cce1 = next(node for node in nodes if node.get("name") == "cce-1")
         self.assertEqual(cce1["parent"], cce1["service_container"])
+
+    def test_service_containers_have_distinct_positions(self):
+        records = [
+            make_record("cce-1", service_type="cce", group="CCE_Deployment"),
+            make_record("cce-2", service_type="cce", group="CCE_Deployment"),
+            make_record("ecs-1", service_type="ecs", targets="rds-1"),
+            make_record("rds-1", service_type="rds"),
+        ]
+
+        elements = build_graph(records)
+        positions = compute_bdat_positions(elements)
+        service_nodes = [
+            e["data"] for e in elements
+            if e["group"] == "nodes" and e["data"]["type"] == "__service__"
+        ]
+        pos = {node["id"]: positions[node["id"]] for node in service_nodes}
+
+        # 每个服务框都有独立坐标，CCE 与 ECS 不会重叠
+        self.assertTrue(all(pos[node["id"]] is not None
+                            for node in service_nodes))
+        self.assertEqual(
+            len({(round(p["x"], 1), round(p["y"], 1)) for p in pos.values()}),
+            len(service_nodes),
+        )
 
     def test_icon_style_uses_fixed_dimensions(self):
         style = _make_cytoscape_style({"ecs": "data:image/png;base64,abc"})

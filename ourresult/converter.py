@@ -375,7 +375,7 @@ def compact_resource_name(name, max_units=26):
 def make_node_display_label(name, service_key):
     """节点框固定显示两行：服务统称 + resource_name。"""
     service_name = compact_resource_name(get_service_display_name(service_key))
-    return f"{service_name}\n{compact_resource_name(name)}"
+    return f"{service_name}\n{name}"
 
 
 def container_min_width(text, font_size=22, padding=48):
@@ -1851,6 +1851,41 @@ def compute_bdat_positions(elements):
                     group_x += g_w + GROUP_GAP
                 service_x = next_service_x
 
+    # 给容器节点补坐标：自底向上按直接子节点中心定位，保证多级嵌套容器
+    # （资源分组框 / 服务框 / 层框 / 业务框）之间互不重叠。
+    node_data = {e["data"]["id"]: e["data"] for e in elements
+                 if e["group"] == "nodes"}
+    children_of = defaultdict(list)
+    for nid, data in node_data.items():
+        parent = data.get("parent")
+        if parent:
+            children_of[parent].append(nid)
+
+    def container_depth(nid):
+        depth = 0
+        cur = node_data[nid].get("parent")
+        while cur:
+            depth += 1
+            cur = node_data[cur].get("parent")
+        return depth
+
+    containers = sorted(
+        (nid for nid, data in node_data.items() if data.get("is_container")),
+        key=lambda nid: -container_depth(nid),
+    )
+    for cid in containers:
+        child_points = [
+            positions[kid] for kid in children_of.get(cid, [])
+            if kid in positions
+        ]
+        if child_points:
+            positions[cid] = {
+                "x": round(sum(p["x"] for p in child_points)
+                           / len(child_points), 1),
+                "y": round(sum(p["y"] for p in child_points)
+                           / len(child_points), 1),
+            }
+
     return positions
 
 
@@ -1907,8 +1942,8 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "text-background-color": "#fff",
                 "text-background-opacity": 0.8,
                 "text-background-padding": "2px",
-                "text-max-width": "100px",
-                "text-wrap": "ellipsis",
+                "text-max-width": "220px",
+                "text-wrap": "wrap",
             }
         },
         {
@@ -2053,7 +2088,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "text-halign": "center",
                 "text-margin-y": 0,
                 "text-background-opacity": 0,
-                "text-max-width": "158px",
+                "text-max-width": "260px",
                 "text-wrap": "wrap",
                 "color": "#2C3E50",
             }
@@ -2079,7 +2114,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "text-background-color": "#fff",
                 "text-background-opacity": 0.86,
                 "text-background-padding": "2px",
-                "text-max-width": "132px",
+                "text-max-width": "240px",
                 "text-wrap": "wrap",
             }
         },
@@ -2208,7 +2243,7 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     # 计算 BDAT 分组层次布局坐标并注入节点数据
     bdat_pos = compute_bdat_positions(elements)
     for e in elements:
-        if e["group"] == "nodes" and not e["data"].get("is_container"):
+        if e["group"] == "nodes":
             nid = e["data"]["id"]
             if nid in bdat_pos:
                 e["data"]["bdat_x"] = bdat_pos[nid]["x"]
