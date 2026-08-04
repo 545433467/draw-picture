@@ -1522,6 +1522,31 @@ def build_graph(records):
                     inferred=True,
                 )
 
+    # ── 四层架构固定层级关系 ──────────────────────────────────────────────
+    # 同一业务内，按固定层级顺序（接入 → 网络负载 → 计算容器 → 中间件数据
+    # 存储）连接相邻的层容器，生成独立且更粗的固定关系箭头。
+    layer_edge_count = [0]
+    layer_order = [key for key, _ in TOPOLOGY_LAYERS]
+    for biz_key, biz_id in business_map.items():
+        present_layers = [
+            layer_key for layer_key in layer_order
+            if (biz_key, layer_key) in layer_map
+        ]
+        for src_key, tgt_key in zip(present_layers, present_layers[1:]):
+            edges.append({"group": "edges", "data": {
+                "id":            f"elayer_{layer_edge_count[0]}",
+                "source":        layer_map[(biz_key, src_key)],
+                "target":        layer_map[(biz_key, tgt_key)],
+                "source_name":   get_topology_layer_name(src_key),
+                "target_name":   get_topology_layer_name(tgt_key),
+                "relation":      "固定层级关系",
+                "layer_relation": 1,
+                "inferred":      0,
+                "cross_business": 0,
+                "color":         "#5D6D7E",
+            }})
+            layer_edge_count[0] += 1
+
     return nodes + edges
 
 
@@ -1820,7 +1845,7 @@ def _make_cytoscape_style(icon_data_uris=None):
             "style": {
                 "label": "data(name)",
                 "text-valign": "top",
-                "font-size": 13,
+                "font-size": 16,
                 "font-weight": "bold",
                 "background-opacity": 0.06,
                 "border-style": "dashed",
@@ -1839,7 +1864,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-width": 3,
                 "background-color": "#EBF5FB",
                 "background-opacity": 0.12,
-                "font-size": 15,
+                "font-size": 24,
                 "font-weight": "bold",
             }
         },
@@ -1851,7 +1876,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-width": 1,
                 "background-color": "#FDFEFE",
                 "background-opacity": 0.08,
-                "font-size": 12,
+                "font-size": 18,
             }
         },
         {
@@ -1862,7 +1887,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "dashed",
                 "background-color": "#F7F9FC",
                 "background-opacity": 0.34,
-                "font-size": 12,
+                "font-size": 18,
                 "font-weight": "bold",
                 "color": "#34495E",
                 "text-valign": "top",
@@ -1928,7 +1953,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "dashed",
                 "background-color": "#F8F9FA",
                 "background-opacity": 0.55,
-                "font-size": 11,
+                "font-size": 18,
                 "font-weight": "bold",
                 "color": "#2C3E50",
                 "text-valign": "top",
@@ -1952,7 +1977,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "background-opacity": 0.16,
                 "border-color": "#2C5F8A",
                 "border-width": 2,
-                "font-size": 10,
+                "font-size": 14,
                 "font-weight": "bold",
                 "color": "#2C3E50",
                 "text-valign": "center",
@@ -2055,7 +2080,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "solid",
                 "background-color": "data(bg_color)",
                 "background-opacity": 0.28,
-                "font-size": 16,
+                "font-size": 22,
                 "font-weight": "bold",
                 "color": "data(text_color)",
                 "text-background-color": "#fff",
@@ -2080,6 +2105,27 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "line-style": "dashed",
                 "line-dash-pattern": [10, 4],
                 "opacity": 0.9,
+            }
+        },
+        # 四层架构固定层级关系：独立、加粗箭头
+        {
+            "selector": "edge[layer_relation = 1]",
+            "style": {
+                "label": "data(relation)",
+                "width": 6,
+                "line-color": "#5D6D7E",
+                "line-style": "solid",
+                "target-arrow-color": "#5D6D7E",
+                "target-arrow-shape": "triangle",
+                "target-arrow-fill": "filled",
+                "curve-style": "bezier",
+                "font-size": 14,
+                "font-weight": "bold",
+                "color": "#34495E",
+                "text-background-color": "#fff",
+                "text-background-opacity": 0.95,
+                "text-background-padding": "3px",
+                "opacity": 0.95,
             }
         },
     ]
@@ -2188,9 +2234,11 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
         if (collapsed_resources or cce_project_nodes)
         else f"{total_resources} 节点"
     )
-    n_edges = sum(1 for e in elements if e.get("group") == "edges")
+    n_edges = sum(1 for e in elements if e.get("group") == "edges"
+                  and not e["data"].get("layer_relation"))
     n_infer = sum(1 for e in elements if e.get("group") == "edges"
-                  and e["data"].get("inferred") == 1)
+                  and e["data"].get("inferred") == 1
+                  and not e["data"].get("layer_relation"))
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">

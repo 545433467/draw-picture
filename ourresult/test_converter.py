@@ -43,6 +43,15 @@ def element_data(elements, group):
     return [element["data"] for element in elements if element["group"] == group]
 
 
+def call_edges(elements):
+    """仅返回普通调用边（排除四层架构固定层级关系边）。"""
+    return [
+        element["data"] for element in elements
+        if element["group"] == "edges"
+        and not element["data"].get("layer_relation")
+    ]
+
+
 class BuildGraphAggregationTests(unittest.TestCase):
     def test_long_resource_name_uses_two_line_compact_label(self):
         long_name = "ecs-production-payment-service-with-a-very-long-instance-name"
@@ -212,6 +221,51 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(business_style["text-max-width"], "320px")
         self.assertEqual(business_style["text-overflow-wrap"], "anywhere")
 
+    def test_container_labels_use_larger_fonts(self):
+        style = _make_cytoscape_style()
+
+        def font_size(selector):
+            return next(
+                item["style"]["font-size"] for item in style
+                if item["selector"] == selector
+            )
+
+        self.assertEqual(font_size("node[type = '__service__']"), 18)
+        self.assertEqual(font_size("node[type = '__layer__']"), 18)
+        self.assertEqual(font_size("node[type = '__business__']"), 22)
+
+    def test_layer_relation_edges_connect_consecutive_layers(self):
+        records = [
+            make_record("waf-1", business="业务A", service_type="waf"),
+            make_record("elb-1", business="业务A", service_type="elb"),
+            make_record("ecs-1", business="业务A", service_type="ecs",
+                        targets="rds-1"),
+            make_record("rds-1", business="业务A", service_type="rds"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        edges = element_data(elements, "edges")
+        layers = {
+            node["id"]: node for node in nodes
+            if node.get("type") == "__layer__"
+        }
+        layer_edges = [
+            edge for edge in edges if edge.get("layer_relation") == 1
+        ]
+
+        self.assertEqual(len(layer_edges), 3)
+        for edge in layer_edges:
+            self.assertIn(edge["source"], layers)
+            self.assertIn(edge["target"], layers)
+            self.assertEqual(edge["relation"], "固定层级关系")
+        order = ["access", "network_lb", "compute_app",
+                 "data_middleware_storage"]
+        chained = [
+            layers[edge["source"]]["layer_key"] for edge in layer_edges
+        ] + [layers[layer_edges[-1]["target"]]["layer_key"]]
+        self.assertEqual(chained, order)
+
     def test_icon_style_uses_fixed_dimensions(self):
         style = _make_cytoscape_style({"ecs": "data:image/png;base64,abc"})
         icon_style = next(
@@ -371,7 +425,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        edges = element_data(elements, "edges")
+        edges = call_edges(elements)
         node_ids = {node["name"]: node["id"] for node in nodes
                     if not node.get("is_container")}
         edge_by_target = {edge["target"]: edge for edge in edges}
@@ -421,7 +475,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        edges = element_data(elements, "edges")
+        edges = call_edges(elements)
         node_ids = {node["name"]: node["id"] for node in nodes
                     if not node.get("is_container")}
 
@@ -450,7 +504,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        edges = element_data(elements, "edges")
+        edges = call_edges(elements)
         node_ids = {node["name"]: node["id"] for node in nodes
                     if not node.get("is_container")}
         endpoints = {(edge["source"], edge["target"]) for edge in edges}
@@ -470,7 +524,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
             make_record("finance-rds", service_type="rds"),
         ]
 
-        edges = element_data(build_graph(records), "edges")
+        edges = call_edges(build_graph(records))
 
         self.assertEqual(len(edges), 1)
         self.assertEqual(edges[0]["target_name"], "finance-rds")
