@@ -220,20 +220,52 @@ cy.on('tap', 'node', function(evt) {
                         d.type === '__business__' || d.type === '__layer__' ||
                         d.type === '__service__';
   if (!isContainerType) {
-    // 展开整条调用链路：反复闭包邻域，直到覆盖所有可达的上游、下游节点
-    // 与它们之间的全部调用线。
-    var chain = evt.target.closedNeighborhood();
-    var prev = 0;
-    while (chain.length !== prev) {
-      prev = chain.length;
-      chain = chain.closedNeighborhood();
+    // 沿调用方向展开，只保留与当前节点有直接/间接调用关系的节点：
+    // 上游 = 能调用当前节点的所有节点（沿边反向遍历）；
+    // 下游 = 当前节点能调用的所有节点（沿边正向遍历）。
+    // 只高亮这些节点之间处于链路上的调用线，不包含仅与旁支相连的节点。
+    var downVisited = evt.target.collection();
+    var frontier = evt.target.collection();
+    while (frontier.length > 0) {
+      var next = cy.collection();
+      frontier.forEach(function(n) {
+        n.outgoers('edge').targets().forEach(function(t) {
+          if (!downVisited.has(t)) {
+            downVisited.merge(t);
+            next.merge(t);
+          }
+        });
+      });
+      frontier = next;
     }
-    chain.edges().removeClass('faded');
-    var chainNodes = chain.nodes().filter(function(n) {
+    var upVisited = evt.target.collection();
+    frontier = evt.target.collection();
+    while (frontier.length > 0) {
+      var next = cy.collection();
+      frontier.forEach(function(n) {
+        n.incomers('edge').sources().forEach(function(s) {
+          if (!upVisited.has(s)) {
+            upVisited.merge(s);
+            next.merge(s);
+          }
+        });
+      });
+      frontier = next;
+    }
+    var chainNodes = upVisited.union(downVisited).filter(function(n) {
       var t = n.data('type');
       return t !== '__region__' && t !== '__group__' && t !== '__business__' &&
              t !== '__layer__' && t !== '__service__';
     });
+    var chainEdges = cy.collection();
+    chainNodes.edgesWith(chainNodes).forEach(function(e) {
+      var s = e.source(), t = e.target();
+      if ((upVisited.has(s) && upVisited.has(t)) ||
+          (downVisited.has(s) && downVisited.has(t))) {
+        chainEdges.merge(e);
+      }
+    });
+    chainEdges.removeClass('faded');
     chainNodes.removeClass('faded').addClass('highlighted');
     // 父容器（业务/层/服务框）也取消淡化：cytoscape 渲染复合父节点时会把
     // 父级透明度作用于子节点，否则链路节点的图标和名称仍会被父框压暗。
