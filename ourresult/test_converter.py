@@ -588,13 +588,18 @@ class BuildGraphAggregationTests(unittest.TestCase):
         # 每个企业项目只有一个聚合节点，名字为企业项目
         self.assertEqual({node["name"] for node in projects}, {"ep-A", "ep-B"})
         self.assertEqual({node["resource_total"] for node in projects}, {1, 2})
-        self.assertEqual(badges, [])
+        self.assertEqual(len(badges), 2)
+        self.assertEqual({node["name"] for node in badges}, {"1", "2"})
         # 聚合节点带 cce 服务键以便读取 CCE_Deployment.png 图标，
-        # 数字（总数）显示在 display_label 第二行（图标下方）。
+        # 名称为企业项目名（数字由独立徽标承载）。
         self.assertTrue(all(node["service_key"] == "cce" for node in projects))
         self.assertTrue(all(
-            node["display_label"].splitlines()[-1] == str(node["resource_total"])
+            node["display_label"] == node["name"]
             for node in projects
+        ))
+        self.assertTrue(all(
+            node.get("anchor") in {p["id"] for p in projects}
+            for node in badges
         ))
         # 不再渲染任何单个 CCE_Deployment 节点
         self.assertEqual(cce_leaves, [])
@@ -616,12 +621,17 @@ class BuildGraphAggregationTests(unittest.TestCase):
         projects = [node for node in nodes if node.get("type") == "__cce_project__"]
         project_by_name = {node["name"]: node for node in projects}
         ep_a = project_by_name["ep-A"]
+        badges = [node for node in nodes if node.get("type") == "__cce_count__"]
+        ep_a_badge = next(
+            node for node in badges if node.get("anchor") == ep_a["id"]
+        )
 
         self.assertEqual(ep_a["resource_total"], 8)
-        self.assertEqual(ep_a["display_label"], "ep-A\n8")
+        self.assertEqual(ep_a["display_label"], "ep-A")
         self.assertEqual(ep_a["service_key"], "cce")
+        self.assertEqual(ep_a_badge["name"], "8")
+        self.assertEqual(ep_a_badge["resource_total"], 8)
         self.assertEqual(project_by_name["ep-B"]["resource_total"], 3)
-        self.assertFalse(any(node.get("type") == "__cce_count__" for node in nodes))
         # CCE 组不再生成摘要节点
         self.assertFalse(any(node.get("is_summary") for node in nodes))
 
