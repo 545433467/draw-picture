@@ -1162,6 +1162,7 @@ def build_graph(records):
             "name": d.get("name", ""),
             "type": (r.get("type") or d.get("type") or "").upper(),
             "service_name": get_service_display_name(d.get("service_key", "default")),
+            "service_key": d.get("service_key", ""),
             "resource_id": d.get("resource_id", ""),
             "spec": d.get("spec", ""),
             "project": d.get("enterprise_id", ""),
@@ -2018,8 +2019,8 @@ def compute_bdat_positions(elements):
         if anchor_id in positions:
             pos = positions[anchor_id]
             positions[nid] = {
-                "x": round(pos["x"] + 55, 1),
-                "y": round(pos["y"] - 60, 1),
+                "x": round(pos["x"] + 64, 1),
+                "y": round(pos["y"] - 70, 1),
             }
 
     # 给容器节点补坐标：自底向上按直接子节点中心定位，保证多级嵌套容器
@@ -2381,34 +2382,35 @@ def _make_cytoscape_style(icon_data_uris=None):
         "selector": "node[type = '__agg_compute__']",
         "style": {
             "label": "data(display_label)",
-            "width": 170,
-            "height": 60,
+            "width": 64,
+            "height": 64,
             "shape": "roundrectangle",
             "background-color": "#EBF5FB",
             "border-color": "#2C5F8A",
             "border-width": 2,
-            "font-size": 14,
+            "font-size": 13,
             "font-weight": "bold",
             "color": "#2C3E50",
-            "text-valign": "center",
+            "text-valign": "bottom",
             "text-halign": "center",
+            "text-margin-y": 6,
             "text-wrap": "wrap",
-            "text-max-width": "160px",
+            "text-max-width": "170px",
         }
     })
     style.append({
         "selector": "node[type = '__agg_count__']",
         "style": {
             "label": "data(name)",
-            "width": 28,
-            "height": 28,
+            "width": 36,
+            "height": 36,
             "shape": "ellipse",
-            "background-color": "#E74C3C",
-            "border-color": "#FFFFFF",
-            "border-width": 2,
-            "font-size": 14,
+            "background-color": "#FFFFFF",
+            "border-color": "#2C5F8A",
+            "border-width": 3,
+            "font-size": 16,
             "font-weight": "bold",
-            "color": "#FFFFFF",
+            "color": "#000000",
             "text-valign": "center",
             "text-halign": "center",
             "text-background-opacity": 0,
@@ -2628,6 +2630,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <button class="tb-btn" onclick="exportPng()">&#128247; 导出图片</button>
   <div class="sep"></div>
   <button id="bizToggleBtn" class="tb-btn" onclick="toggleBusinessView()" style="background:rgba(26,188,156,.35)">&#127968; 业务分组:开</button>
+  <button id="aggToggleBtn" class="tb-btn" onclick="toggleAggregateView()" style="background:rgba(52,73,94,.35)">&#128269; 展开缩略节点</button>
   <div class="sep"></div>
   <select id="layoutSelect" onchange="changeLayout(this.value)">
     {layout_options}
@@ -2709,7 +2712,9 @@ cy.on('tap', 'node', function(evt) {{
   var bg = d.bg_color || '#888';
   if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__') {{
     showContainerDetail(d);
-  }} else if (d.type === '__agg_compute__' || d.type === '__agg_count__') {{
+  }} else if (d.type === '__agg_compute__') {{
+    expandAllAggregates();
+  }} else if (d.type === '__agg_count__') {{
     showSummaryDetail(d);
   }} else if (d.is_summary === 1) {{
     showSummaryDetail(d);
@@ -3064,6 +3069,203 @@ function searchNodes(q) {{
   }} else {{
     showToast('未找到匹配节点');
   }}
+}}
+
+// ── 缩略节点展开 / 收起（点击图标展开，点击数字球看明细） ──────────────────
+var _aggExpanded = false;
+var _expandedNodes = [];
+var _expandedEdges = [];
+var _savedAggEdges = [];
+var _EXP_NODE_W = 190;
+var _EXP_ROW_H = 120;
+var _EXP_MAX_ROW = 7;
+
+function _wrapClientName(name) {{
+  var lines = [], cur = [], units = 0;
+  String(name || '').split('').forEach(function(ch) {{
+    var u = ch.charCodeAt(0) < 128 ? 1 : 2;
+    if (units + u > 18 && cur.length) {{
+      lines.push(cur.join('')); cur = []; units = 0;
+    }}
+    cur.push(ch); units += u;
+  }});
+  if (cur.length) lines.push(cur.join(''));
+  return lines.join('\\n');
+}}
+
+function _aggNameMap() {{
+  var map = {{}};
+  cy.nodes().forEach(function(n) {{
+    var nm = n.data('name');
+    if (nm) map[String(nm).trim().toLowerCase()] = n;
+  }});
+  return map;
+}}
+
+function _addExpandedEdge(srcId, tgtId, tname, inferred, orig) {{
+  if (srcId === tgtId) return;
+  var key = srcId + '|' + tgtId + '|' + (inferred ? 1 : 0);
+  for (var i = 0; i < _expandedEdges.length; i++) {{
+    if (_expandedEdges[i]._key === key) {{
+      _expandedEdges[i].call_count += 1;
+      _expandedEdges[i].relation =
+        (orig && orig.relation ? orig.relation : '调用') +
+        ' ×' + _expandedEdges[i].call_count;
+      return;
+    }}
+  }}
+  var color = inferred
+    ? '#8E44AD'
+    : (orig && orig.color ? orig.color : '#3498DB');
+  var ed = {{
+    id: 'expe_' + _expandedEdges.length + '_' + srcId + '_' + tgtId,
+    source: srcId,
+    target: tgtId,
+    source_name: '',
+    target_name: tname || '',
+    relation: (orig && orig.relation ? orig.relation : '调用') +
+              (inferred ? '（推断）' : ''),
+    call_count: 1,
+    color: color,
+    inferred: inferred ? 1 : 0,
+    cross_business: 0,
+    _key: key,
+  }};
+  _expandedEdges.push(ed);
+  cy.add({{ group: 'edges', data: ed }});
+}}
+
+function expandAllAggregates() {{
+  if (_aggExpanded) return;
+  var aggs = cy.nodes('[type = "__agg_compute__"]');
+  if (aggs.length === 0) return;
+  var nameMap = _aggNameMap();
+  var aggIds = {{}};
+
+  aggs.forEach(function(a) {{
+    aggIds[a.id()] = true;
+    var pos = a.position();
+    var resources = a.data('summary_resources') || [];
+    var rows = Math.ceil(resources.length / _EXP_MAX_ROW);
+    var cols = Math.min(resources.length, _EXP_MAX_ROW);
+    var startX = pos.x - (cols - 1) * _EXP_NODE_W / 2;
+    var startY = pos.y - (rows - 1) * _EXP_ROW_H / 2;
+    resources.forEach(function(item, i) {{
+      var col = i % _EXP_MAX_ROW, row = Math.floor(i / _EXP_MAX_ROW);
+      var nid = 'exp_' + a.id() + '_' + i;
+      var node = cy.add({{ group: 'nodes', data: {{
+        id: nid,
+        name: item.name,
+        display_label: (item.service_name || item.type || '') + '\\n' +
+                       _wrapClientName(item.name),
+        type: item.type || 'default',
+        service_key: item.service_key || 'default',
+        service_name: item.service_name || '',
+        resource_id: item.resource_id || '',
+        enterprise_id: item.project || '',
+        enterprise_project: item.enterprise_project || item.project || '',
+        business: item.business || a.data('business'),
+        business_key: a.data('business_key'),
+        group_label: item.group || '',
+        region: item.region || '',
+        spec: item.spec || '',
+        desc: item.desc || '',
+        parent: a.data('parent'),
+        agg_source: a.id(),
+        downstream: item.downstream || [],
+        inferred_downstream: item.inferred_downstream || [],
+        is_grouped_resource: 1,
+        is_container: 0,
+        is_summary: 0,
+        has_icon: 1,
+      }} }});
+      node.position({{ x: startX + col * _EXP_NODE_W,
+                      y: startY + row * _EXP_ROW_H }});
+      nameMap[String(item.name).trim().toLowerCase()] = node;
+      _expandedNodes.push(nid);
+    }});
+  }});
+
+  // 保存并移除指向缩略节点的原始边
+  cy.edges().forEach(function(e) {{
+    if (aggIds[e.source().id()] || aggIds[e.target().id()]) {{
+      _savedAggEdges.push(JSON.parse(JSON.stringify(e.data())));
+      e.remove();
+    }}
+  }});
+
+  // 由展开节点自身的下游信息重建调用边
+  _expandedNodes.forEach(function(nid) {{
+    var n = cy.getElementById(nid);
+    (n.data('downstream') || []).forEach(function(tname) {{
+      var t = nameMap[String(tname).trim().toLowerCase()];
+      if (t && !aggIds[t.id()]) _addExpandedEdge(nid, t.id(), tname, false);
+    }});
+    (n.data('inferred_downstream') || []).forEach(function(tname) {{
+      var t = nameMap[String(tname).trim().toLowerCase()];
+      if (t && !aggIds[t.id()]) _addExpandedEdge(nid, t.id(), tname, true);
+    }});
+  }});
+
+  // 原始边按名称重定向（如 ELB → 展开后的具体 ECS）
+  _savedAggEdges.forEach(function(ed) {{
+    var src = nameMap[String(ed.source_name || '').trim().toLowerCase()];
+    var tgt = nameMap[String(ed.target_name || '').trim().toLowerCase()];
+    if (src && tgt && src.id() !== tgt.id()) {{
+      _addExpandedEdge(src.id(), tgt.id(), ed.target_name,
+                       ed.inferred === 1, ed);
+    }}
+  }});
+
+  aggs.style('display', 'none');
+  cy.nodes('[type = "__agg_count__"]').style('display', 'none');
+  _aggExpanded = true;
+  runPresetLayout();
+  document.getElementById('aggToggleBtn').textContent =
+    '&#128269; 收起缩略节点';
+  showToast('已展开全部缩略节点');
+}}
+
+function collapseAllAggregates() {{
+  if (!_aggExpanded) return;
+  _expandedEdges.forEach(function(ed) {{
+    var e = cy.getElementById(ed.id);
+    if (!e.empty()) e.remove();
+  }});
+  _expandedEdges = [];
+  _expandedNodes.forEach(function(nid) {{
+    var n = cy.getElementById(nid);
+    if (!n.empty()) n.remove();
+  }});
+  _expandedNodes = [];
+  _savedAggEdges.forEach(function(ed) {{
+    cy.add({{ group: 'edges', data: ed }});
+  }});
+  _savedAggEdges = [];
+  cy.nodes('[type = "__agg_compute__"]').style('display', 'element');
+  cy.nodes('[type = "__agg_count__"]').style('display', 'element');
+  _aggExpanded = false;
+  runPresetLayout();
+  document.getElementById('aggToggleBtn').textContent =
+    '&#128269; 展开缩略节点';
+  showToast('已收起缩略节点');
+}}
+
+function toggleAggregateView() {{
+  if (_aggExpanded) {{ collapseAllAggregates(); }}
+  else {{ expandAllAggregates(); }}
+}}
+
+function runPresetLayout() {{
+  cy.layout({{
+    name: 'preset',
+    positions: function(node) {{
+      var bx = node.data('bdat_x'), by = node.data('bdat_y');
+      return (bx != null) ? {{ x: +bx, y: +by }} : undefined;
+    }},
+    animate: false,
+    padding: 60,
+  }}).run();
 }}
 
 var _bizViewOn = true;
