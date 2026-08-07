@@ -460,6 +460,13 @@ _VIRTUAL_CONTAINER_TYPES = {
 # 布局：每行最多摆放的云资源节点数
 MAX_NODES_PER_ROW = 7
 
+# 业务关键字过滤：只绘制“所属业务”包含该关键字（不区分大小写）的业务及其节点；
+# 设为 None 表示不过滤。
+BUSINESS_FILTER_KEYWORD = "chat"
+
+# 需要聚合为一个缩略节点的服务类型（按业务聚合）
+AGGREGATE_SERVICE_KEYS = {"cce", "ecs"}
+
 # 业务容器的调色板（背景, 边框, 标题色）——按顺序循环分配给各业务
 BUSINESS_PALETTE = [
     ("#E8F8F5", "#1ABC9C", "#0E6655"),   # 青绿
@@ -669,6 +676,21 @@ def build_graph(records):
             r for r in records if _name_key(r["name"]) not in filtered_names
         ]
 
+    # 业务关键字过滤：只保留“所属业务”包含指定关键字（如 chat）的业务。
+    # 未填写所属业务的记录暂时保留，待回退归并后再按最终业务过滤。
+    if BUSINESS_FILTER_KEYWORD:
+        keyword = BUSINESS_FILTER_KEYWORD.casefold()
+        for r in records:
+            biz_text = (r.get("business") or "").strip()
+            if biz_text and keyword not in biz_text.casefold():
+                filtered_names.add(_name_key(r["name"]))
+        records = [
+            r for r in records
+            if not ((r.get("business") or "").strip()
+                    and keyword
+                    not in (r.get("business") or "").strip().casefold())
+        ]
+
     nodes = []
     edges = []
     edge_lookup = {}
@@ -805,6 +827,18 @@ def build_graph(records):
     for i, r in enumerate(records):
         entry = make_entry(r, i)
         entries.append(entry)
+
+    # 回退归并后的最终业务若不含关键字，同样丢弃（含虚拟业务）。
+    if BUSINESS_FILTER_KEYWORD:
+        keyword = BUSINESS_FILTER_KEYWORD.casefold()
+        kept_entries = []
+        for entry in entries:
+            biz_label = (entry["data"].get("business") or "").strip()
+            if keyword in biz_label.casefold():
+                kept_entries.append(entry)
+            else:
+                filtered_names.add(_name_key(entry["data"].get("name", "")))
+        entries = kept_entries
 
     def name_key(name):
         return str(name or "").strip().casefold()
@@ -1076,31 +1110,18 @@ def build_graph(records):
             forced_service_key=spec["service_key"],
         ))
 
+    # 外部节点同样遵循业务关键字过滤：不属于 chat 业务的虚拟业务不绘制。
+    if BUSINESS_FILTER_KEYWORD:
+        keyword = BUSINESS_FILTER_KEYWORD.casefold()
+        entries = [
+            entry for entry in entries
+            if keyword in (entry["data"].get("business") or "").casefold()
+        ]
+
     name_entry_map = build_name_map(entries)
     service_groups = defaultdict(list)
     for entry in entries:
         service_groups[entry["group_key"]].append(entry)
-
-    # 收集所有被引用（作为下游目标）的资源名，用于判断 ECS 是否有上游调用。
-    referenced_names = set()
-    for entry in entries:
-        r = entry["record"]
-        for target_name in split_target_names(r.get("targets", "")):
-            referenced_names.add(name_key(target_name))
-        for target_name in split_target_names(r.get("inferred_targets", "")):
-            referenced_names.add(
-                name_key(parse_inferred_reference(target_name)["target_name"])
-            )
-
-    def entry_has_call_relation(entry):
-        """ECS 有下游服务或作为上游被调用时返回 True。"""
-        r = entry["record"]
-        has_downstream = bool(
-            split_target_names(r.get("targets", ""))
-            or split_target_names(r.get("inferred_targets", ""))
-        )
-        has_upstream = name_key(entry["data"]["name"]) in referenced_names
-        return has_downstream or has_upstream
 
     visible_indexes = set()
     group_info = {}
@@ -1108,17 +1129,11 @@ def build_graph(records):
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
         )
-        # 非 ECS 服务全部展示（不再缩略）；ECS 只展示有调用关系的节点，
-        # 其余合并为摘要。
-        if svc_key == "ecs":
-            visible_entries = [
-                entry for entry in group_entries
-                if entry_has_call_relation(entry)
-            ]
-            hidden_entries = [
-                entry for entry in group_entries
-                if not entry_has_call_relation(entry)
-            ]
+        # CCE / CCE_Deployment / ECS 聚合为单个缩略节点，不逐个渲染；
+        # 其他服务全部展示。
+        if svc_key in AGGREGATE_SERVICE_KEYS:
+            visible_entries = []
+            hidden_entries = []
         else:
             visible_entries = list(group_entries)
             hidden_entries = []
@@ -1326,6 +1341,22 @@ def build_graph(records):
             agg["visible_count"] += len(group_info[group_key]["visible"])
             agg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
+    # 按业务聚合 CCE / CCE_Deployment / ECS：每业务一个缩略节点。
+    agg_meta = {}
+    for group_key, info in service_groups.items():
+        biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
+            group_key
+        )
+        if svc_key not in AGGREGATE_SERVICE_KEYS:
+            continue
+        meta = agg_meta.setdefault(biz_key, {
+            "count": 0, "resources": [], "layer_key": layer_key,
+        })
+        meta["count"] += len(info)
+        meta["resources"].extend(make_summary_resource(entry) for entry in info)
+
+    agg_compute_ids = {}
+    agg_compute_nodes = []
     service_container_ids = {}
     group_containers = []
     group_container_counter = [0]
@@ -1340,6 +1371,35 @@ def build_graph(records):
             rendered_ids.add(sid)
 
         is_virtual = business_meta[biz_key]["is_virtual"]
+        if svc_key in AGGREGATE_SERVICE_KEYS:
+            if biz_key not in agg_compute_ids:
+                meta = agg_meta[biz_key]
+                agg_id = f"aggc_{biz_id}"
+                agg_compute_ids[biz_key] = agg_id
+                agg_parent = (
+                    biz_id if is_virtual
+                    else layer_map[(biz_key, meta["layer_key"])]
+                )
+                agg_compute_nodes.append({"group": "nodes", "data": {
+                    "id":              agg_id,
+                    "name":            f"...+{meta['count']}",
+                    "display_label":   f"CCE/ECS\n...+{meta['count']}",
+                    "type":            "__agg_compute__",
+                    "service_key":     "cce",
+                    "service_name":    "CCE/ECS",
+                    "layer_key":       meta["layer_key"],
+                    "layer_name":      get_topology_layer_name(meta["layer_key"]),
+                    "business":        business_meta[biz_key]["name"],
+                    "business_key":    biz_key,
+                    "resource_total":  meta["count"],
+                    "summary_resources": meta["resources"],
+                    "agg_icons":       ["cce", "ecs"],
+                    "is_container":    0,
+                    "is_summary":      0,
+                    "parent":          agg_parent,
+                }})
+            continue
+
         if is_virtual:
             continue
 
@@ -1474,12 +1534,14 @@ def build_graph(records):
                     snode["data"]["layer_container"] = layer_id
 
     nodes = (biz_containers + layer_containers + service_containers
-             + group_containers + nodes)
+             + group_containers + agg_compute_nodes + nodes)
 
     # ── 3. 创建边 ─────────────────────────────────────────────────────────
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
+        if entry["data"]["service_key"] in AGGREGATE_SERVICE_KEYS:
+            return f"aggc_{business_map[entry['data']['business_key']]}"
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
         gkey = (
@@ -1491,6 +1553,8 @@ def build_graph(records):
 
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
+        if entry["data"]["service_key"] in AGGREGATE_SERVICE_KEYS:
+            return f"aggc_{business_map[entry['data']['business_key']]}"
         if entry["group_key"]:
             return group_info[entry["group_key"]]["first_id"]
         return entry["data"]["id"]
@@ -1637,17 +1701,17 @@ def compute_bdat_positions(elements):
     - 同一服务块内按“资源分组”再拆成独立小方块，块与块之间留有间隔
     返回 {node_id: {'x': float, 'y': float}}
     """
-    NODE_W        = 210
-    ROW_H         = 140
-    SERVICE_GAP   = 220
-    GROUP_GAP     = 320
+    NODE_W        = 190
+    ROW_H         = 120
+    SERVICE_GAP   = 120
+    GROUP_GAP     = 170
     SERVICES_PER_ROW = 100
-    SERVICE_ROW_GAP = 260
-    LAYER_GAP     = 420
+    SERVICE_ROW_GAP = 160
+    LAYER_GAP     = 260
     MAX_ROW_NODES = MAX_NODES_PER_ROW
     GROUP_PAD     = 110
-    GAP_X         = 450
-    GAP_Y         = 380
+    GAP_X         = 320
+    GAP_Y         = 300
     MAX_COLS      = 4
 
     leaf_nodes = {}
@@ -1998,7 +2062,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "label": "data(name)",
                 "min-width": "data(min_width)",
                 "text-valign": "top",
-                "font-size": 20,
+                "font-size": 22,
                 "font-weight": "bold",
                 "background-opacity": 0.06,
                 "border-style": "dashed",
@@ -2017,7 +2081,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-width": 3,
                 "background-color": "#EBF5FB",
                 "background-opacity": 0.12,
-                "font-size": 28,
+                "font-size": 30,
                 "font-weight": "bold",
             }
         },
@@ -2029,7 +2093,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-width": 1,
                 "background-color": "#FDFEFE",
                 "background-opacity": 0.08,
-                "font-size": 22,
+                "font-size": 24,
             }
         },
         {
@@ -2040,7 +2104,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "dashed",
                 "background-color": "#F7F9FC",
                 "background-opacity": 0.34,
-                "font-size": 22,
+                "font-size": 24,
                 "font-weight": "bold",
                 "color": "#34495E",
                 "text-wrap": "none",
@@ -2063,7 +2127,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "target-arrow-color": "data(color)",
                 "target-arrow-shape": "triangle",
                 "curve-style": "bezier",
-                "font-size": 10,
+                "font-size": 12,
                 "color": "#555",
                 "text-background-color": "#fff",
                 "text-background-opacity": 0.8,
@@ -2083,7 +2147,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "target-arrow-color": "data(color)",
                 "target-arrow-shape": "triangle",
                 "curve-style": "bezier",
-                "font-size": 9,
+                "font-size": 11,
                 "color": "#888",
                 "text-background-color": "#fff",
                 "text-background-opacity": 0.7,
@@ -2108,7 +2172,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "dashed",
                 "background-color": "#F8F9FA",
                 "background-opacity": 0.55,
-                "font-size": 22,
+                "font-size": 24,
                 "font-weight": "bold",
                 "color": "#2C3E50",
                 "text-valign": "top",
@@ -2128,7 +2192,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "height": 58,
                 "shape": "roundrectangle",
                 "background-opacity": 0.14,
-                "font-size": 10,
+                "font-size": 13,
                 "font-weight": "bold",
                 "text-valign": "center",
                 "text-halign": "center",
@@ -2162,6 +2226,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "text-background-padding": "2px",
                 "text-max-width": "160px",
                 "text-wrap": "wrap",
+                "font-size": 13,
             }
         },
         # 被折叠资源的摘要节点
@@ -2175,7 +2240,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "background-opacity": 0.14,
                 "border-style": "dashed",
                 "border-width": 2,
-                "font-size": 12,
+                "font-size": 14,
                 "font-weight": "bold",
                 "text-valign": "center",
                 "text-halign": "center",
@@ -2193,7 +2258,7 @@ def _make_cytoscape_style(icon_data_uris=None):
                 "border-style": "solid",
                 "background-color": "data(bg_color)",
                 "background-opacity": 0.28,
-                "font-size": 26,
+                "font-size": 28,
                 "font-weight": "bold",
                 "color": "data(text_color)",
                 "text-background-color": "#fff",
@@ -2247,6 +2312,64 @@ def _make_cytoscape_style(icon_data_uris=None):
         style.append({
             "selector": f"node[service_key = '{service_key}'][has_icon = 1]",
             "style": {"background-image": f'url("{icon_data_uri}")'},
+        })
+
+    # CCE/ECS 聚合缩略节点：同时展示 CCE 与 ECS 两个图标 + “...+N”文字。
+    cce_icon = icon_data_uris.get("cce")
+    ecs_icon = icon_data_uris.get("ecs")
+    if cce_icon and ecs_icon:
+        style.append({
+            "selector": "node[type = '__agg_compute__']",
+            "style": {
+                "label": "data(display_label)",
+                "width": 150,
+                "height": 62,
+                "shape": "roundrectangle",
+                "background-image": [
+                    f'url("{cce_icon}")', f'url("{ecs_icon}")',
+                ],
+                "background-fit": ["contain", "contain"],
+                "background-clip": ["none", "none"],
+                "background-width": ["42%", "42%"],
+                "background-height": ["48%", "48%"],
+                "background-position-x": ["26%", "74%"],
+                "background-position-y": ["35%", "35%"],
+                "background-opacity": [1, 1],
+                "background-color": "#EBF5FB",
+                "border-color": "#2C5F8A",
+                "border-width": 2,
+                "font-size": 14,
+                "font-weight": "bold",
+                "color": "#2C3E50",
+                "text-valign": "bottom",
+                "text-halign": "center",
+                "text-margin-y": 4,
+                "text-background-color": "#fff",
+                "text-background-opacity": 0.9,
+                "text-background-padding": "2px",
+                "text-wrap": "wrap",
+                "text-max-width": "140px",
+            }
+        })
+    else:
+        style.append({
+            "selector": "node[type = '__agg_compute__']",
+            "style": {
+                "label": "data(display_label)",
+                "width": 150,
+                "height": 62,
+                "shape": "roundrectangle",
+                "background-color": "#EBF5FB",
+                "border-color": "#2C5F8A",
+                "border-width": 2,
+                "font-size": 14,
+                "font-weight": "bold",
+                "color": "#2C3E50",
+                "text-valign": "center",
+                "text-halign": "center",
+                "text-wrap": "wrap",
+                "text-max-width": "140px",
+            }
         })
 
     style.extend([
@@ -2305,6 +2428,14 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
         if data.get("is_container") or data.get("is_summary"):
             data["has_icon"] = 0
             continue
+        if data.get("type") == "__agg_compute__":
+            # 聚合节点使用专属的双图标样式，不走单服务图标规则。
+            data["has_icon"] = 0
+            for agg_key in data.get("agg_icons", []):
+                uri = get_service_icon_data_uri(agg_key)
+                if uri:
+                    icon_data_uris[agg_key] = uri
+            continue
         service_key = str(data.get("service_key") or "").casefold()
         icon_data_uri = get_service_icon_data_uri(service_key)
         if icon_data_uri and service_key:
@@ -2328,14 +2459,22 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     visible_resources = sum(1 for e in elements if e.get("group") == "nodes"
                             and not e["data"].get("is_container")
                             and not e["data"].get("is_summary"))
+    agg_compute_nodes = [e for e in elements if e.get("group") == "nodes"
+                         and e["data"].get("type") == "__agg_compute__"]
     summary_nodes = sum(1 for e in elements if e.get("group") == "nodes"
                         and e["data"].get("is_summary"))
     collapsed_resources = sum(e["data"].get("collapsed_count", 0) for e in elements
                               if e.get("group") == "nodes" and e["data"].get("is_summary"))
-    total_resources = visible_resources + collapsed_resources
-    resource_stat = (f"{visible_resources + summary_nodes} 可见 / "
-                     f"{total_resources} 资源"
-                     if collapsed_resources else f"{total_resources} 节点")
+    agg_total = sum(
+        node["data"].get("resource_total", 0) for node in agg_compute_nodes
+    )
+    total_resources = visible_resources + collapsed_resources + agg_total
+    resource_stat = (
+        f"{visible_resources + summary_nodes + len(agg_compute_nodes)} 可见 / "
+        f"{total_resources} 资源"
+        if (collapsed_resources or agg_compute_nodes)
+        else f"{total_resources} 节点"
+    )
     n_edges = sum(1 for e in elements if e.get("group") == "edges"
                   and not e["data"].get("layer_relation"))
     n_infer = sum(1 for e in elements if e.get("group") == "edges"
@@ -2534,6 +2673,8 @@ cy.on('tap', 'node', function(evt) {{
   var bg = d.bg_color || '#888';
   if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__') {{
     showContainerDetail(d);
+  }} else if (d.type === '__agg_compute__') {{
+    showSummaryDetail(d);
   }} else if (d.is_summary === 1) {{
     showSummaryDetail(d);
   }} else {{
@@ -2937,7 +3078,7 @@ function showToast(msg) {{
 
     size_kb = os.path.getsize(output_path) // 1024
     print(f"已生成: {output_path}  ({size_kb} KB)")
-    print(f"  可见节点: {visible_resources + summary_nodes}")
+    print(f"  可见节点: {visible_resources + summary_nodes + len(agg_compute_nodes)}")
     print(f"  资源总数: {total_resources}")
     print(f"  确认连线: {n_edges - n_infer}")
     print(f"  推断连线: {n_infer}")

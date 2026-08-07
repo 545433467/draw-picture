@@ -38,9 +38,9 @@ def create_sample():
     # ── 生成约 1000 个节点的模拟数据 ────────────────────────────────────────
     random.seed(20260803)
 
-    businesses = ["订单业务", "支付业务", "用户中心", "风控业务", "数据平台"]
-    biz_keys   = {"订单业务": "order", "支付业务": "pay", "用户中心": "user",
-                  "风控业务": "risk", "数据平台": "data"}
+    businesses = ["chat", "chat&推荐", "chat&支付", "chat&风控", "chat&数据"]
+    biz_keys   = {"chat": "chat", "chat&推荐": "rec", "chat&支付": "pay",
+                  "chat&风控": "risk", "chat&数据": "data"}
     projects = [("生产项目", "ep-prod-001"),
                 ("测试项目", "ep-test-002"),
                 ("预发项目", "ep-stage-003")]

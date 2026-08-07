@@ -53,17 +53,25 @@ def call_edges(elements):
 
 
 class BuildGraphAggregationTests(unittest.TestCase):
+    def setUp(self):
+        # 默认关闭业务关键字过滤，避免影响既有用例；专门测试中再开启。
+        self._old_biz_filter = converter.BUSINESS_FILTER_KEYWORD
+        converter.BUSINESS_FILTER_KEYWORD = None
+
+    def tearDown(self):
+        converter.BUSINESS_FILTER_KEYWORD = self._old_biz_filter
+
     def test_long_resource_name_uses_two_line_full_label(self):
         long_name = "ecs-production-payment-service-with-a-very-long-instance-name"
 
         elements = build_graph([
-            make_record(long_name, service_type="ecs", targets="rds-dummy")
+            make_record(long_name, service_type="rds")
         ])
         node = next(data for data in element_data(elements, "nodes")
                     if not data.get("is_container"))
 
         label_lines = node["display_label"].splitlines()
-        self.assertEqual(label_lines[0], "ECS")
+        self.assertEqual(label_lines[0], "RDS")
         # 资源名称完整显示并折成多行，不做“...”缩写
         self.assertGreaterEqual(len(label_lines), 3)
         self.assertEqual("".join(label_lines[1:]), long_name)
@@ -76,48 +84,47 @@ class BuildGraphAggregationTests(unittest.TestCase):
                            if not data.get("is_container"))
         self.assertTrue(custom_node["display_label"].splitlines()[0].endswith("..."))
 
-    def test_ecs_without_call_relations_are_collapsed(self):
-        records = [make_record(f"ecs-node-{i}", service_type="ecs")
-                   for i in range(1, 9)]
-        records[0]["targets"] = "ecs-node-2"          # 有下游
-        records[2]["targets"] = "ecs-node-2"          # 有下游；ecs-node-2 有上游
-        records[4]["enterprise_id"] = "ep-hidden"
-        records[4]["group"] = "hidden-group"
-        records[4]["source"] = "inventory-sheet"
+    def test_cce_ecs_aggregated_per_business(self):
+        records = [
+            make_record("ecs-1", service_type="ecs", targets="rds-1"),
+            make_record("ecs-2", service_type="ecs"),
+            make_record("cce-1", service_type="cce", group="CCE_Deployment"),
+            make_record("rds-1", service_type="rds"),
+        ]
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        resource_nodes = [node for node in nodes if not node.get("is_container")]
-        service = next(node for node in nodes if node.get("type") == "__service__")
-        summaries = [node for node in nodes if node.get("is_summary")]
-        summary = next(node for node in summaries
-                       if node.get("group_label") == "hidden-group")
-        default_summary = next(node for node in summaries
-                               if node.get("group_label") == "(未设置资源分组)")
+        aggs = [node for node in nodes if node.get("type") == "__agg_compute__"]
+        cce_ecs_leaves = [
+            node for node in nodes
+            if node.get("service_key") in {"cce", "ecs"}
+            and not node.get("is_container") and not node.get("is_summary")
+            and node.get("type") != "__agg_compute__"
+        ]
 
-        self.assertEqual(service["name"], "ECS")
-        self.assertEqual(service["resource_total"], 8)
-        self.assertEqual(service["visible_count"], 3)
-        self.assertEqual(service["collapsed_count"], 5)
-        # 隐藏资源按资源分组拆分：空分组 4 个 + hidden-group 1 个
-        self.assertEqual(len(resource_nodes), 5)  # 3 个 ECS + 2 个摘要
-        self.assertEqual(default_summary["name"], "...+4")
-        self.assertEqual(default_summary["collapsed_count"], 4)
-        self.assertEqual(summary["name"], "...+1")
-        self.assertEqual(summary["collapsed_count"], 1)
-        self.assertEqual(summary["group_label"], "hidden-group")
-        self.assertEqual(len(summary["summary_resources"]), 1)
-        first_hidden = default_summary["summary_resources"][0]
-        self.assertEqual(first_hidden["name"], "ecs-node-4")
-        self.assertEqual(first_hidden["type"], "ECS")
-        self.assertEqual(first_hidden["business"], "业务A")
-        self.assertEqual(first_hidden["downstream"], [])
-        hidden_with_meta = summary["summary_resources"][0]
-        self.assertEqual(hidden_with_meta["name"], "ecs-node-5")
-        self.assertEqual(hidden_with_meta["project"], "ep-hidden")
-        self.assertEqual(hidden_with_meta["source"], "inventory-sheet")
+        self.assertEqual(len(aggs), 1)
+        self.assertEqual(aggs[0]["resource_total"], 3)
+        self.assertEqual(len(aggs[0]["summary_resources"]), 3)
+        self.assertEqual(cce_ecs_leaves, [])
+        self.assertTrue(any(node.get("name") == "rds-1" for node in nodes))
 
-    def test_cross_business_call_targets_first_resource_in_service_group(self):
+    def test_elb_points_to_aggregate_with_single_edge(self):
+        records = [
+            make_record("elb-1", service_type="elb", targets="ecs-1,ecs-2"),
+            make_record("ecs-1", service_type="ecs"),
+            make_record("ecs-2", service_type="ecs"),
+        ]
+
+        elements = build_graph(records)
+        edges = call_edges(elements)
+        agg = next(node for node in element_data(elements, "nodes")
+                   if node.get("type") == "__agg_compute__")
+
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]["target"], agg["id"])
+        self.assertEqual(edges[0]["call_count"], 2)
+
+    def test_cross_business_call_targets_aggregate_node(self):
         records = [make_record("api-1", business="业务A", service_type="apig",
                                targets="cce-node-6")]
         records.extend(make_record(f"cce-node-{i}", business="业务B")
@@ -125,34 +132,19 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        edge = element_data(elements, "edges")[0]
-        first_cce = next(node for node in nodes if node.get("name") == "cce-node-1")
+        edges = call_edges(elements)
+        agg_b = next(
+            node for node in nodes
+            if node.get("type") == "__agg_compute__"
+            and node.get("business") == "业务B"
+        )
+        edge = next(edge for edge in edges if edge["target_name"] == "cce-node-6")
 
-        self.assertEqual(edge["target"], first_cce["id"])
-        self.assertEqual(edge["target_name"], "cce-node-6")
+        self.assertEqual(edge["target"], agg_b["id"])
         self.assertEqual(edge["cross_business"], 1)
 
-    def test_same_business_calls_stay_direct_without_collapse(self):
-        records = [make_record("cce-node-1", targets="cce-node-6")]
-        records.extend(make_record(f"cce-node-{i}") for i in range(2, 6))
-        records.append(make_record("cce-node-6", targets="cce-node-1"))
-
-        elements = build_graph(records)
-        nodes = element_data(elements, "nodes")
-        edges = element_data(elements, "edges")
-        node_ids = {
-            node["name"]: node["id"] for node in nodes
-            if not node.get("is_container")
-        }
-
-        endpoints = {(edge["source"], edge["target"]) for edge in edges}
-        self.assertIn((node_ids["cce-node-1"], node_ids["cce-node-6"]), endpoints)
-        self.assertIn((node_ids["cce-node-6"], node_ids["cce-node-1"]), endpoints)
-        self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
-        self.assertFalse(any(node.get("is_summary") for node in nodes))
-
     def test_max_nodes_per_row_stay_on_one_layout_row(self):
-        records = [make_record(f"cce-node-{i}")
+        records = [make_record(f"rds-node-{i}", service_type="rds")
                    for i in range(1, MAX_NODES_PER_ROW + 1)]
 
         elements = build_graph(records)
@@ -236,9 +228,9 @@ class BuildGraphAggregationTests(unittest.TestCase):
                 if item["selector"] == selector
             )
 
-        self.assertEqual(font_size("node[type = '__service__']"), 22)
-        self.assertEqual(font_size("node[type = '__layer__']"), 22)
-        self.assertEqual(font_size("node[type = '__business__']"), 26)
+        self.assertEqual(font_size("node[type = '__service__']"), 24)
+        self.assertEqual(font_size("node[type = '__layer__']"), 24)
+        self.assertEqual(font_size("node[type = '__business__']"), 28)
 
     def test_layer_relation_edges_connect_consecutive_layers(self):
         records = [
@@ -274,10 +266,10 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
     def test_resource_group_subcontainers_separate_mixed_groups(self):
         records = [
-            make_record("cce-1", service_type="cce", group="CCE_Deployment"),
-            make_record("cce-2", service_type="cce", group="CCE_Deployment"),
-            make_record("cce-3", service_type="cce", group="K8s集群"),
-            make_record("cce-4", service_type="cce", group=""),
+            make_record("dcs-1", service_type="dcs", group="缓存A"),
+            make_record("dcs-2", service_type="dcs", group="缓存A"),
+            make_record("dcs-3", service_type="dcs", group="缓存B"),
+            make_record("dcs-4", service_type="dcs", group=""),
         ]
 
         elements = build_graph(records)
@@ -287,33 +279,31 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         # 同一服务组内有 3 个不同资源分组值 → 生成 3 个次级框，框名为资源分组
         self.assertEqual({node["name"] for node in group_boxes},
-                         {"CCE_Deployment", "K8s集群", "(未设置资源分组)"})
-        cce1 = next(node for node in nodes if node.get("name") == "cce-1")
-        box = node_by_id[cce1["parent"]]
+                         {"缓存A", "缓存B", "(未设置资源分组)"})
+        dcs1 = next(node for node in nodes if node.get("name") == "dcs-1")
+        box = node_by_id[dcs1["parent"]]
         self.assertEqual(box["type"], "__group__")
-        self.assertEqual(box["name"], "CCE_Deployment")
-        self.assertEqual(box["parent"], cce1["service_container"])
+        self.assertEqual(box["name"], "缓存A")
+        self.assertEqual(box["parent"], dcs1["service_container"])
         self.assertEqual(box["resource_total"], 2)
 
     def test_single_resource_group_value_keeps_flat_layout(self):
         records = [
-            make_record("cce-1", service_type="cce", group="CCE_Deployment"),
-            make_record("cce-2", service_type="cce", group="CCE_Deployment"),
+            make_record("dcs-1", service_type="dcs", group="缓存A"),
+            make_record("dcs-2", service_type="dcs", group="缓存A"),
         ]
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
 
         self.assertFalse(any(node.get("type") == "__group__" for node in nodes))
-        cce1 = next(node for node in nodes if node.get("name") == "cce-1")
-        self.assertEqual(cce1["parent"], cce1["service_container"])
+        dcs1 = next(node for node in nodes if node.get("name") == "dcs-1")
+        self.assertEqual(dcs1["parent"], dcs1["service_container"])
 
     def test_service_containers_have_distinct_positions(self):
         records = [
-            make_record("cce-1", service_type="cce", group="CCE_Deployment"),
-            make_record("cce-2", service_type="cce", group="CCE_Deployment"),
-            make_record("ecs-1", service_type="ecs", targets="rds-1"),
             make_record("rds-1", service_type="rds"),
+            make_record("dcs-1", service_type="dcs"),
         ]
 
         elements = build_graph(records)
@@ -324,7 +314,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         ]
         pos = {node["id"]: positions[node["id"]] for node in service_nodes}
 
-        # 每个服务框都有独立坐标，CCE 与 ECS 不会重叠
+        # 每个服务框都有独立坐标，不同资源类型不会重叠
         self.assertTrue(all(pos[node["id"]] is not None
                             for node in service_nodes))
         self.assertEqual(
@@ -463,15 +453,17 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        edges = element_data(elements, "edges")
-        node_ids = {node["name"]: node["id"] for node in nodes
-                    if not node.get("is_container")}
+        edges = call_edges(elements)
+        agg = next(node for node in nodes if node.get("type") == "__agg_compute__")
+        node_ids = {
+            node["name"]: node["id"] for node in nodes
+            if not node.get("is_container") and node.get("type") != "__agg_compute__"
+        }
         endpoints = {(edge["source"], edge["target"]) for edge in edges}
 
-        self.assertIn((node_ids["cce-prod"], node_ids["ecs-prod"]), endpoints)
-        self.assertIn((node_ids["ecs-prod"], node_ids["rds-prod"]), endpoints)
-        self.assertIn((node_ids["ecs-prod"], node_ids["dcs-prod"]), endpoints)
-        self.assertIn((node_ids["ecs-prod"], node_ids["obs-prod"]), endpoints)
+        self.assertIn((agg["id"], node_ids["rds-prod"]), endpoints)
+        self.assertIn((agg["id"], node_ids["dcs-prod"]), endpoints)
+        self.assertIn((agg["id"], node_ids["obs-prod"]), endpoints)
         self.assertIn((node_ids["obs-prod"], node_ids["elb-prod"]), endpoints)
         self.assertTrue(all(edge["cross_business"] == 0 for edge in edges))
 
@@ -516,14 +508,14 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        edges = element_data(elements, "edges")
-        payment = next(node for node in nodes if node.get("name") == "payment-api")
+        edges = call_edges(elements)
+        agg = next(node for node in nodes if node.get("type") == "__agg_compute__")
         external = next(node for node in nodes
                         if node.get("name") == "external-k8s-api")
         edge_by_name = {edge["target_name"]: edge for edge in edges}
 
         self.assertEqual(len(edges), 2)
-        self.assertEqual(edge_by_name["payment-api"]["target"], payment["id"])
+        self.assertEqual(edge_by_name["payment-api"]["target"], agg["id"])
         self.assertEqual(edge_by_name["external-k8s-api"]["target"], external["id"])
         self.assertTrue(external["is_external"])
         self.assertTrue(all(edge["inferred"] == 1 for edge in edges))
@@ -571,13 +563,16 @@ class BuildGraphAggregationTests(unittest.TestCase):
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
         edges = call_edges(elements)
-        node_ids = {node["name"]: node["id"] for node in nodes
-                    if not node.get("is_container")}
+        agg = next(node for node in nodes if node.get("type") == "__agg_compute__")
+        node_ids = {
+            node["name"]: node["id"] for node in nodes
+            if not node.get("is_container") and node.get("type") != "__agg_compute__"
+        }
         endpoints = {(edge["source"], edge["target"]) for edge in edges}
 
         self.assertEqual(len(edges), 4)
-        self.assertIn((node_ids["vpc-main"], node_ids["cce-main"]), endpoints)
-        self.assertIn((node_ids["cce-main"], node_ids["dms-main"]), endpoints)
+        self.assertIn((node_ids["vpc-main"], agg["id"]), endpoints)
+        self.assertIn((agg["id"], node_ids["dms-main"]), endpoints)
         self.assertIn((node_ids["dms-main"], node_ids["dcs-main"]), endpoints)
         self.assertIn((node_ids["dcs-main"], node_ids["rds-main"]), endpoints)
         self.assertTrue(all(edge["inferred"] == 1 for edge in edges))
@@ -597,24 +592,24 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
     def test_same_service_nodes_form_one_contiguous_layout_block(self):
         records = [
-            make_record("ecs-1", service_type="ecs", targets="rds-1"),
-            make_record("rds-1", service_type="rds", targets="ecs-2"),
-            make_record("ecs-2", service_type="ecs"),
-            make_record("ecs-3", service_type="ecs", targets="rds-1"),
+            make_record("cci-1", service_type="cci", targets="rds-1"),
+            make_record("rds-1", service_type="rds", targets="cci-2"),
+            make_record("cci-2", service_type="cci"),
+            make_record("cci-3", service_type="cci", targets="rds-1"),
         ]
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
         positions = compute_bdat_positions(elements)
-        ecs_nodes = [node for node in nodes if node.get("service_key") == "ecs"
+        cci_nodes = [node for node in nodes if node.get("service_key") == "cci"
                      and not node.get("is_container")]
         rds_nodes = [node for node in nodes if node.get("service_key") == "rds"
                      and not node.get("is_container")]
 
-        self.assertEqual(len({node["parent"] for node in ecs_nodes}), 1)
-        ecs_y = [positions[node["id"]]["y"] for node in ecs_nodes]
+        self.assertEqual(len({node["parent"] for node in cci_nodes}), 1)
+        cci_y = [positions[node["id"]]["y"] for node in cci_nodes]
         rds_y = [positions[node["id"]]["y"] for node in rds_nodes]
-        self.assertTrue(max(ecs_y) < min(rds_y) or max(rds_y) < min(ecs_y))
+        self.assertTrue(max(cci_y) < min(rds_y) or max(rds_y) < min(cci_y))
 
     def test_services_in_same_layer_are_laid_out_on_one_row(self):
         records = [
@@ -705,7 +700,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(len({pos["x"] for pos in ordered_positions[:4]}), 4)
         self.assertGreater(ordered_positions[4]["y"], ordered_positions[0]["y"])
 
-    def test_cce_deployment_nodes_are_drawn_individually(self):
+    def test_cce_deployment_aggregated_into_one_node(self):
         records = [
             make_record("bj-prod-app-deploy-1", service_type="cce",
                         group="CCE_Deployment", enterprise_id="ep-A"),
@@ -717,19 +712,18 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
+        aggs = [node for node in nodes if node.get("type") == "__agg_compute__"]
         cce_leaves = [
             node for node in nodes
             if node.get("service_key") == "cce"
             and not node.get("is_container") and not node.get("is_summary")
+            and node.get("type") != "__agg_compute__"
         ]
 
-        # CCE_Deployment 不再聚合/缩略，全部按普通节点绘制
-        self.assertEqual({node["name"] for node in cce_leaves},
-                         {"bj-prod-app-deploy-1", "bj-prod-app-deploy-2",
-                          "bj4-prod-app-deploy-1"})
-        self.assertFalse(any(node.get("type") in {"__cce_project__",
-                                                  "__cce_count__"}
-                             for node in nodes))
+        # CCE_Deployment 全部聚合为一个缩略节点
+        self.assertEqual(len(aggs), 1)
+        self.assertEqual(aggs[0]["resource_total"], 3)
+        self.assertEqual(cce_leaves, [])
         self.assertFalse(any(node.get("is_summary") for node in nodes))
 
     def test_cce_deployment_without_business_stays_in_virtual_business(self):
@@ -743,16 +737,12 @@ class BuildGraphAggregationTests(unittest.TestCase):
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
         business = next(node for node in nodes if node.get("type") == "__business__")
-        leaves = [
-            node for node in nodes
-            if not node.get("is_container") and not node.get("is_summary")
-        ]
+        agg = next(node for node in nodes if node.get("type") == "__agg_compute__")
 
         self.assertEqual(business["name"], "CCE")
         self.assertEqual(business["is_virtual_business"], 1)
-        self.assertEqual(len(leaves), 2)
-        self.assertTrue(all(node.get("parent") == business["id"]
-                            for node in leaves))
+        self.assertEqual(agg["resource_total"], 2)
+        self.assertEqual(agg["parent"], business["id"])
 
     def test_cce_deployment_without_business_falls_back_to_project_business(self):
         records = [
@@ -767,14 +757,12 @@ class BuildGraphAggregationTests(unittest.TestCase):
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
         businesses = [node for node in nodes if node.get("type") == "__business__"]
-        leaf_by_name = {
-            node["name"]: node for node in nodes
-            if not node.get("is_container") and not node.get("is_summary")
-        }
+        aggs = [node for node in nodes if node.get("type") == "__agg_compute__"]
+        agg_by_biz = {node["business"]: node for node in aggs}
 
         self.assertEqual({node["name"] for node in businesses}, {"业务A", "CCE"})
-        self.assertEqual(leaf_by_name["bj-prod-app-deploy-2"]["business"], "业务A")
-        self.assertEqual(leaf_by_name["gz-prod-app-deploy-1"]["business"], "CCE")
+        self.assertEqual(agg_by_biz["业务A"]["resource_total"], 2)
+        self.assertEqual(agg_by_biz["CCE"]["resource_total"], 1)
 
     def test_cce_fallback_requires_same_prefix(self):
         records = [
@@ -786,14 +774,13 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        leaf_by_name = {
-            node["name"]: node for node in nodes
-            if not node.get("is_container") and not node.get("is_summary")
-        }
+        aggs = [node for node in nodes if node.get("type") == "__agg_compute__"]
 
         # 企业项目相同但前缀不同（bj4-prod-app ≠ bj-prod-app），不合并，
         # 无业务节点留在虚拟 CCE 业务。
-        self.assertEqual(leaf_by_name["bj4-prod-app-deploy-1"]["business"], "CCE")
+        by_biz = {node["business"]: node for node in aggs}
+        self.assertEqual(by_biz["业务A"]["resource_total"], 1)
+        self.assertEqual(by_biz["CCE"]["resource_total"], 1)
 
     def test_cce_fallback_prefers_business_with_more_same_prefix_nodes(self):
         records = [
@@ -809,13 +796,12 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        leaf_by_name = {
-            node["name"]: node for node in nodes
-            if not node.get("is_container") and not node.get("is_summary")
-        }
+        aggs = [node for node in nodes if node.get("type") == "__agg_compute__"]
+        by_biz = {node["business"]: node for node in aggs}
 
         # 业务A 有 2 个同前缀节点，业务B 只有 1 个 → 无业务节点并入业务A。
-        self.assertEqual(leaf_by_name["bj-prod-app-deploy-3"]["business"], "业务A")
+        self.assertEqual(by_biz["业务A"]["resource_total"], 3)
+        self.assertEqual(by_biz["业务B"]["resource_total"], 1)
 
     def test_cce_prefix_uses_three_segments_by_default(self):
         self.assertEqual(
@@ -838,17 +824,12 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        leaf_by_name = {
-            node["name"]: node for node in nodes
-            if not node.get("is_container") and not node.get("is_summary")
-        }
+        agg = next(node for node in nodes if node.get("type") == "__agg_compute__")
+        resources = agg["summary_resources"]
+        first = next(r for r in resources if r["name"] == "bj-prod-app-deploy-1")
 
-        self.assertEqual(leaf_by_name["bj-prod-app-deploy-1"]["enterprise_project"],
-                         "生产项目")
-        self.assertEqual(
-            leaf_by_name["bj-prod-app-deploy-1"]["enterprise_project_name"],
-            "生产项目",
-        )
+        self.assertEqual(first["enterprise_project"], "生产项目")
+        self.assertEqual(first["project"], "ep-id-1")
 
     def test_core_business_only_nodes_are_drawn(self):
         records = [
@@ -867,13 +848,14 @@ class BuildGraphAggregationTests(unittest.TestCase):
         leaves = [
             node["name"] for node in nodes
             if not node.get("is_container") and not node.get("is_summary")
-            and node.get("type") != "__cce_count__"
+            and node.get("type") != "__agg_compute__"
         ]
+        aggs = [node for node in nodes if node.get("type") == "__agg_compute__"]
 
         # 存在“是否核心业务”列时，只有“是”的节点被绘制；
         # 无该列标记的行（None）等同于不存在该列，不参与。
-        self.assertIn("ecs-core-1", leaves)
-        self.assertIn("ecs-core-2", leaves)
+        self.assertEqual(len(aggs), 1)
+        self.assertEqual(aggs[0]["resource_total"], 2)
         self.assertIn("rds-core", leaves)
         self.assertNotIn("rds-non-core", leaves)
         self.assertNotIn("obs-empty-core", leaves)
@@ -893,10 +875,13 @@ class BuildGraphAggregationTests(unittest.TestCase):
         leaf_names = {
             node["name"] for node in nodes
             if not node.get("is_container") and not node.get("is_summary")
-            and node.get("type") != "__cce_count__"
+            and node.get("type") != "__agg_compute__"
         }
+        aggs = [node for node in nodes if node.get("type") == "__agg_compute__"]
 
-        self.assertEqual(leaf_names, {"ecs-core-1"})
+        self.assertEqual(leaf_names, set())
+        self.assertEqual(len(aggs), 1)
+        self.assertEqual(aggs[0]["resource_total"], 1)
         # 被过滤节点不生成外部节点，也不产生连线
         self.assertEqual(edges, [])
 
@@ -918,15 +903,35 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         elements = build_graph(records)
         nodes = element_data(elements, "nodes")
-        leaves = [
-            node["name"] for node in nodes
-            if node.get("service_key") == "cce"
-            and not node.get("is_container") and not node.get("is_summary")
-        ]
+        agg = next(node for node in nodes if node.get("type") == "__agg_compute__")
 
-        # 只绘制核心部署：ep-A 的 2 个是核心，ep-B 的 1 个不是
-        self.assertEqual(leaves,
-                         ["bj-prod-app-deploy-1", "bj-prod-app-deploy-2"])
+        # 聚合节点只统计核心部署
+        self.assertEqual(agg["resource_total"], 2)
+
+    def test_business_keyword_filter_keeps_only_chat_businesses(self):
+        records = [
+            make_record("ecs-1", business="chat", service_type="ecs",
+                        targets="rds-1,rds-2"),
+            make_record("rds-1", business="chat", service_type="rds"),
+            make_record("ecs-2", business="chat&推荐", service_type="ecs"),
+            make_record("ecs-3", business="支付业务", service_type="ecs"),
+            make_record("rds-2", business="支付业务", service_type="rds"),
+        ]
+        converter.BUSINESS_FILTER_KEYWORD = "chat"
+        try:
+            elements = build_graph(records)
+        finally:
+            converter.BUSINESS_FILTER_KEYWORD = self._old_biz_filter
+
+        nodes = element_data(elements, "nodes")
+        businesses = [node for node in nodes if node.get("type") == "__business__"]
+        names = {node["name"] for node in nodes}
+
+        self.assertEqual({node["name"] for node in businesses}, {"chat", "chat&推荐"})
+        self.assertIn("rds-1", names)
+        # 非 chat 业务的节点不绘制，也不生成外部节点
+        self.assertNotIn("rds-2", names)
+        self.assertNotIn("ecs-3", names)
 
     def test_read_excel_detects_enterprise_project_name_column(self):
         wb = openpyxl.Workbook()
