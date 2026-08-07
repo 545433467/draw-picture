@@ -102,9 +102,14 @@ class BuildGraphAggregationTests(unittest.TestCase):
             and node.get("type") != "__agg_compute__"
         ]
 
-        self.assertEqual(len(aggs), 1)
-        self.assertEqual(aggs[0]["resource_total"], 3)
-        self.assertEqual(len(aggs[0]["summary_resources"]), 3)
+        # 按资源分组聚合：空分组 2 个（ecs-1/ecs-2），CCE_Deployment 分组 1 个
+        self.assertEqual(len(aggs), 2)
+        by_label = {node["group_label"]: node for node in aggs}
+        self.assertEqual(by_label["(未设置资源分组)"]["resource_total"], 2)
+        self.assertEqual(by_label["CCE_Deployment"]["resource_total"], 1)
+        self.assertEqual(
+            len(by_label["(未设置资源分组)"]["summary_resources"]), 2
+        )
         self.assertEqual(cce_ecs_leaves, [])
         self.assertTrue(any(node.get("name") == "rds-1" for node in nodes))
 
@@ -875,7 +880,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         leaf_names = {
             node["name"] for node in nodes
             if not node.get("is_container") and not node.get("is_summary")
-            and node.get("type") != "__agg_compute__"
+            and node.get("type") not in {"__agg_compute__", "__agg_count__"}
         }
         aggs = [node for node in nodes if node.get("type") == "__agg_compute__"]
 

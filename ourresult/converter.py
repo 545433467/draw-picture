@@ -1341,7 +1341,8 @@ def build_graph(records):
             agg["visible_count"] += len(group_info[group_key]["visible"])
             agg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
-    # 按业务聚合 CCE / CCE_Deployment / ECS：每业务一个缩略节点。
+    # 按“业务 × 资源分组”聚合 CCE / CCE_Deployment / ECS：
+    # 每个资源分组生成一个缩略节点。
     agg_meta = {}
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
@@ -1349,14 +1350,23 @@ def build_graph(records):
         )
         if svc_key not in AGGREGATE_SERVICE_KEYS:
             continue
-        meta = agg_meta.setdefault(biz_key, {
-            "count": 0, "resources": [], "layer_key": layer_key,
-        })
-        meta["count"] += len(info)
-        meta["resources"].extend(make_summary_resource(entry) for entry in info)
+        for entry in info:
+            glabel = (
+                (entry["data"].get("group_label") or "").strip()
+                or "(未设置资源分组)"
+            )
+            gkey = glabel.casefold()
+            meta = agg_meta.setdefault((biz_key, gkey), {
+                "count": 0, "resources": [], "layer_key": layer_key,
+                "label": glabel, "svc_keys": set(),
+            })
+            meta["count"] += 1
+            meta["resources"].append(make_summary_resource(entry))
+            meta["svc_keys"].add(svc_key)
 
     agg_compute_ids = {}
     agg_compute_nodes = []
+    agg_count_nodes = []
     service_container_ids = {}
     group_containers = []
     group_container_counter = [0]
@@ -1372,31 +1382,55 @@ def build_graph(records):
 
         is_virtual = business_meta[biz_key]["is_virtual"]
         if svc_key in AGGREGATE_SERVICE_KEYS:
-            if biz_key not in agg_compute_ids:
-                meta = agg_meta[biz_key]
-                agg_id = f"aggc_{biz_id}"
-                agg_compute_ids[biz_key] = agg_id
+            for entry in info:
+                glabel = (
+                    (entry["data"].get("group_label") or "").strip()
+                    or "(未设置资源分组)"
+                )
+                agg_key = (biz_key, glabel.casefold())
+                if agg_key in agg_compute_ids:
+                    continue
+                meta = agg_meta[agg_key]
+                agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
+                agg_compute_ids[agg_key] = agg_id
                 agg_parent = (
                     biz_id if is_virtual
                     else layer_map[(biz_key, meta["layer_key"])]
                 )
+                primary_svc = (
+                    "cce" if "cce" in meta["svc_keys"]
+                    else next(iter(meta["svc_keys"]))
+                )
+                service_label = "/".join(
+                    get_service_display_name(s) for s in sorted(meta["svc_keys"])
+                )
                 agg_compute_nodes.append({"group": "nodes", "data": {
                     "id":              agg_id,
                     "name":            f"...+{meta['count']}",
-                    "display_label":   f"CCE/ECS\n...+{meta['count']}",
+                    "display_label":   f"{meta['label']}\n...+{meta['count']}",
                     "type":            "__agg_compute__",
-                    "service_key":     "cce",
-                    "service_name":    "CCE/ECS",
+                    "service_key":     primary_svc,
+                    "service_name":    service_label,
                     "layer_key":       meta["layer_key"],
                     "layer_name":      get_topology_layer_name(meta["layer_key"]),
                     "business":        business_meta[biz_key]["name"],
                     "business_key":    biz_key,
+                    "group_label":     meta["label"],
                     "resource_total":  meta["count"],
                     "summary_resources": meta["resources"],
-                    "agg_icons":       ["cce", "ecs"],
                     "is_container":    0,
                     "is_summary":      0,
                     "parent":          agg_parent,
+                }})
+                agg_count_nodes.append({"group": "nodes", "data": {
+                    "id":              f"aggcnt_{len(agg_count_nodes)}",
+                    "name":            str(meta["count"]),
+                    "type":            "__agg_count__",
+                    "anchor":          agg_id,
+                    "resource_total":  meta["count"],
+                    "parent":          agg_parent,
+                    "is_container":    0,
+                    "is_summary":      0,
                 }})
             continue
 
@@ -1534,14 +1568,20 @@ def build_graph(records):
                     snode["data"]["layer_container"] = layer_id
 
     nodes = (biz_containers + layer_containers + service_containers
-             + group_containers + agg_compute_nodes + nodes)
+             + group_containers + agg_compute_nodes + agg_count_nodes + nodes)
 
     # ── 3. 创建边 ─────────────────────────────────────────────────────────
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
         if entry["data"]["service_key"] in AGGREGATE_SERVICE_KEYS:
-            return f"aggc_{business_map[entry['data']['business_key']]}"
+            gkey = (
+                (entry["data"].get("group_label") or "").strip().casefold()
+                or "(未设置资源分组)".casefold()
+            )
+            return agg_compute_ids.get(
+                (entry["data"]["business_key"], gkey), ""
+            )
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
         gkey = (
@@ -1554,7 +1594,13 @@ def build_graph(records):
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
         if entry["data"]["service_key"] in AGGREGATE_SERVICE_KEYS:
-            return f"aggc_{business_map[entry['data']['business_key']]}"
+            gkey = (
+                (entry["data"].get("group_label") or "").strip().casefold()
+                or "(未设置资源分组)".casefold()
+            )
+            return agg_compute_ids.get(
+                (entry["data"]["business_key"], gkey), ""
+            )
         if entry["group_key"]:
             return group_info[entry["group_key"]]["first_id"]
         return entry["data"]["id"]
@@ -1715,10 +1761,15 @@ def compute_bdat_positions(elements):
     MAX_COLS      = 4
 
     leaf_nodes = {}
+    badge_nodes = {}
     edges_list = []
     for e in elements:
-        if e["group"] == "nodes" and not e["data"].get("is_container"):
-            leaf_nodes[e["data"]["id"]] = e["data"]
+        if e["group"] == "nodes":
+            data = e["data"]
+            if data.get("type") == "__agg_count__":
+                badge_nodes[data["id"]] = data
+            elif not data.get("is_container"):
+                leaf_nodes[data["id"]] = data
         elif e["group"] == "edges":
             edges_list.append((e["data"]["source"], e["data"]["target"]))
 
@@ -1960,6 +2011,16 @@ def compute_bdat_positions(elements):
                                 }
                         group_x += g_w + GROUP_GAP
                     service_x = next_service_x
+
+    # 数字徽标跟随其锚点（聚合缩略节点），显示在其右上方。
+    for nid, data in badge_nodes.items():
+        anchor_id = data.get("anchor")
+        if anchor_id in positions:
+            pos = positions[anchor_id]
+            positions[nid] = {
+                "x": round(pos["x"] + 55, 1),
+                "y": round(pos["y"] - 60, 1),
+            }
 
     # 给容器节点补坐标：自底向上按直接子节点中心定位，保证多级嵌套容器
     # （资源分组框 / 服务框 / 层框 / 业务框）之间互不重叠。
@@ -2314,63 +2375,45 @@ def _make_cytoscape_style(icon_data_uris=None):
             "style": {"background-image": f'url("{icon_data_uri}")'},
         })
 
-    # CCE/ECS 聚合缩略节点：同时展示 CCE 与 ECS 两个图标 + “...+N”文字。
-    cce_icon = icon_data_uris.get("cce")
-    ecs_icon = icon_data_uris.get("ecs")
-    if cce_icon and ecs_icon:
-        style.append({
-            "selector": "node[type = '__agg_compute__']",
-            "style": {
-                "label": "data(display_label)",
-                "width": 150,
-                "height": 62,
-                "shape": "roundrectangle",
-                "background-image": [
-                    f'url("{cce_icon}")', f'url("{ecs_icon}")',
-                ],
-                "background-fit": ["contain", "contain"],
-                "background-clip": ["none", "none"],
-                "background-width": ["42%", "42%"],
-                "background-height": ["48%", "48%"],
-                "background-position-x": ["26%", "74%"],
-                "background-position-y": ["35%", "35%"],
-                "background-opacity": [1, 1],
-                "background-color": "#EBF5FB",
-                "border-color": "#2C5F8A",
-                "border-width": 2,
-                "font-size": 14,
-                "font-weight": "bold",
-                "color": "#2C3E50",
-                "text-valign": "bottom",
-                "text-halign": "center",
-                "text-margin-y": 4,
-                "text-background-color": "#fff",
-                "text-background-opacity": 0.9,
-                "text-background-padding": "2px",
-                "text-wrap": "wrap",
-                "text-max-width": "140px",
-            }
-        })
-    else:
-        style.append({
-            "selector": "node[type = '__agg_compute__']",
-            "style": {
-                "label": "data(display_label)",
-                "width": 150,
-                "height": 62,
-                "shape": "roundrectangle",
-                "background-color": "#EBF5FB",
-                "border-color": "#2C5F8A",
-                "border-width": 2,
-                "font-size": 14,
-                "font-weight": "bold",
-                "color": "#2C3E50",
-                "text-valign": "center",
-                "text-halign": "center",
-                "text-wrap": "wrap",
-                "text-max-width": "140px",
-            }
-        })
+    # CCE/ECS 聚合缩略节点：优先走标准图标机制（保留图标原样），
+    # 无图标时使用此回退样式；数字徽标为独立红色圆圈。
+    style.append({
+        "selector": "node[type = '__agg_compute__']",
+        "style": {
+            "label": "data(display_label)",
+            "width": 170,
+            "height": 60,
+            "shape": "roundrectangle",
+            "background-color": "#EBF5FB",
+            "border-color": "#2C5F8A",
+            "border-width": 2,
+            "font-size": 14,
+            "font-weight": "bold",
+            "color": "#2C3E50",
+            "text-valign": "center",
+            "text-halign": "center",
+            "text-wrap": "wrap",
+            "text-max-width": "160px",
+        }
+    })
+    style.append({
+        "selector": "node[type = '__agg_count__']",
+        "style": {
+            "label": "data(name)",
+            "width": 28,
+            "height": 28,
+            "shape": "ellipse",
+            "background-color": "#E74C3C",
+            "border-color": "#FFFFFF",
+            "border-width": 2,
+            "font-size": 14,
+            "font-weight": "bold",
+            "color": "#FFFFFF",
+            "text-valign": "center",
+            "text-halign": "center",
+            "text-background-opacity": 0,
+        }
+    })
 
     style.extend([
         {"selector": "node[has_icon = 1]:selected", "style": {
@@ -2428,14 +2471,6 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
         if data.get("is_container") or data.get("is_summary"):
             data["has_icon"] = 0
             continue
-        if data.get("type") == "__agg_compute__":
-            # 聚合节点使用专属的双图标样式，不走单服务图标规则。
-            data["has_icon"] = 0
-            for agg_key in data.get("agg_icons", []):
-                uri = get_service_icon_data_uri(agg_key)
-                if uri:
-                    icon_data_uris[agg_key] = uri
-            continue
         service_key = str(data.get("service_key") or "").casefold()
         icon_data_uri = get_service_icon_data_uri(service_key)
         if icon_data_uri and service_key:
@@ -2458,7 +2493,8 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     # 统计数字
     visible_resources = sum(1 for e in elements if e.get("group") == "nodes"
                             and not e["data"].get("is_container")
-                            and not e["data"].get("is_summary"))
+                            and not e["data"].get("is_summary")
+                            and e["data"].get("type") != "__agg_count__")
     agg_compute_nodes = [e for e in elements if e.get("group") == "nodes"
                          and e["data"].get("type") == "__agg_compute__"]
     summary_nodes = sum(1 for e in elements if e.get("group") == "nodes"
@@ -2673,7 +2709,7 @@ cy.on('tap', 'node', function(evt) {{
   var bg = d.bg_color || '#888';
   if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__') {{
     showContainerDetail(d);
-  }} else if (d.type === '__agg_compute__') {{
+  }} else if (d.type === '__agg_compute__' || d.type === '__agg_count__') {{
     showSummaryDetail(d);
   }} else if (d.is_summary === 1) {{
     showSummaryDetail(d);
@@ -2855,6 +2891,9 @@ function summaryRow(item) {{
 }}
 
 function showSummaryDetail(d) {{
+  if (d.type === '__agg_count__' && d.anchor) {{
+    d = cy.getElementById(d.anchor).data();
+  }}
   var drawer = document.getElementById('summary-drawer');
   drawer._summary = d;
   drawer._resources = d.summary_resources || [];
@@ -2982,6 +3021,10 @@ function exportPng() {{
 
 function changeLayout(name) {{
   var opts;
+  // 数字徽标依赖 BDAT 相对定位，切换其他布局时隐藏。
+  cy.nodes('[type = "__agg_count__"]').style(
+    'display', name === 'bdat' ? 'element' : 'none'
+  );
   if (name === 'bdat') {{
     opts = {{
       name: 'preset',
