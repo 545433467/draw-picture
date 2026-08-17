@@ -913,7 +913,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         # 聚合节点只统计核心部署
         self.assertEqual(agg["resource_total"], 2)
 
-    def test_business_keyword_filter_keeps_only_chat_businesses(self):
+    def test_business_keyword_filter_merges_chat_businesses(self):
         records = [
             make_record("ecs-1", business="chat", service_type="ecs",
                         targets="rds-1,rds-2"),
@@ -931,8 +931,20 @@ class BuildGraphAggregationTests(unittest.TestCase):
         nodes = element_data(elements, "nodes")
         businesses = [node for node in nodes if node.get("type") == "__business__"]
         names = {node["name"] for node in nodes}
+        chat_nodes = [
+            node for node in nodes
+            if not node.get("is_container")
+            and node.get("name") in {"ecs-1", "rds-1", "ecs-2"}
+        ]
 
-        self.assertEqual({node["name"] for node in businesses}, {"chat", "chat&推荐"})
+        self.assertEqual([node["name"] for node in businesses], ["chat"])
+        self.assertEqual(businesses[0]["business_key"], "__business__:chat")
+        self.assertEqual(businesses[0]["resource_total"], 3)
+        self.assertTrue(all(node["business"] == "chat" for node in chat_nodes))
+        self.assertEqual(
+            next(node for node in chat_nodes if node["name"] == "ecs-2")["source_business"],
+            "chat&推荐",
+        )
         self.assertIn("rds-1", names)
         # 非 chat 业务的节点不绘制，也不生成外部节点
         self.assertNotIn("rds-2", names)

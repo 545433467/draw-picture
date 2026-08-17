@@ -572,9 +572,17 @@ def extract_inferred_reason_chains(value):
     return chains
 
 
+def merged_business_name(value):
+    """Return the visible business label after optional keyword-based merging."""
+    text = str(value or "").strip()
+    if BUSINESS_FILTER_KEYWORD and BUSINESS_FILTER_KEYWORD.casefold() in text.casefold():
+        return BUSINESS_FILTER_KEYWORD
+    return text
+
+
 def canonical_business_name(value):
     """生成业务身份键，合并大小写及常见分隔符差异。"""
-    text = str(value or "").strip()
+    text = merged_business_name(value)
     return re.sub(r"[\s_-]+", "-", text).strip("-").casefold()
 
 
@@ -726,7 +734,7 @@ def build_graph(records):
         if cand is None:
             cand = {
                 "biz_key": biz_key,
-                "biz_label": biz_text,
+                "biz_label": merged_business_name(biz_text),
                 "prefix_keys": set(),
                 "count": 0,
             }
@@ -782,7 +790,7 @@ def build_graph(records):
             biz_key = f"__business__:{normalized_biz or source_biz.casefold()}"
         else:
             biz_key = f"__service_business__:{svc_key}"
-        biz_label = source_biz or get_service_display_name(svc_key)
+        biz_label = merged_business_name(source_biz) or get_service_display_name(svc_key)
         group_key = (biz_key, layer_key, svc_key)
 
         data = {
