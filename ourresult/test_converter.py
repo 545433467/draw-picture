@@ -359,10 +359,25 @@ class BuildGraphAggregationTests(unittest.TestCase):
             converter.get_service_key("anything", "default", "foo-CCAAS-bar"),
             "cc",
         )
+
+    def test_dcaas_resource_type_maps_to_network_layer(self):
         self.assertEqual(
-            converter.get_service_key("anything", "default", "foo-DCAAS-bar"),
-            "cc",
+            converter.get_service_key("anything", "DCAAS_service"),
+            "dcaas",
         )
+        elements = build_graph([
+            make_record(
+                "dcaas-node",
+                service_type="DCAAS_service",
+                resource_id="id-dcaas",
+            )
+        ])
+        node = next(
+            data for data in element_data(elements, "nodes")
+            if not data.get("is_container")
+        )
+        self.assertEqual(node["service_key"], "dcaas")
+        self.assertEqual(node["layer_key"], "network_lb")
 
     def test_cc_group_and_resource_id_map_to_network_layer(self):
         records = [
@@ -371,12 +386,6 @@ class BuildGraphAggregationTests(unittest.TestCase):
                 service_type="default",
                 group="CC_bandwidth",
                 resource_id="id-CCAAS-001",
-            ),
-            make_record(
-                "svc-2",
-                service_type="default",
-                group="dcaas-group",
-                resource_id="id-DCAAS-002",
             ),
         ]
 
@@ -387,13 +396,12 @@ class BuildGraphAggregationTests(unittest.TestCase):
         }
 
         self.assertEqual(nodes["svc-1"]["service_key"], "cc")
-        self.assertEqual(nodes["svc-2"]["service_key"], "cc")
         self.assertEqual(nodes["svc-1"]["layer_key"], "network_lb")
-        self.assertEqual(nodes["svc-2"]["layer_key"], "network_lb")
 
     def test_new_resources_map_to_expected_layers(self):
         self.assertEqual(get_topology_layer("nat"), "network_lb")
         self.assertEqual(get_topology_layer("cc"), "network_lb")
+        self.assertEqual(get_topology_layer("dcaas"), "network_lb")
         self.assertEqual(get_topology_layer("cnad"), "network_lb")
         self.assertEqual(get_topology_layer("geminidb"), "data_middleware_storage")
 

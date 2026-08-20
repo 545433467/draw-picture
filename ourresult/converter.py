@@ -333,7 +333,7 @@ def split_group_key(group_key):
 
 def _resource_id_hint(resource_id):
     text = str(resource_id or "").casefold()
-    if "ccaas" in text or "dcaas" in text:
+    if "ccaas" in text:
         return "cc"
     return ""
 
@@ -367,6 +367,10 @@ def get_service_key(name, type_field, resource_id="", group=""):
         normalized_type = re.split(r"[-_./:\s]+", type_text, maxsplit=1)[0]
         if normalized_type == "kubernetes":
             return "k8s"
+        if normalized_type == "ccaas":
+            return "cc"
+        if normalized_type == "dcaas":
+            return "dcaas"
         if normalized_type in SERVICE_DISPLAY_NAMES and normalized_type != "default":
             return normalized_type
         for pattern, key in NAME_PATTERNS:
@@ -445,7 +449,7 @@ TOPOLOGY_LAYER_ORDER = {key: index for index, (key, _) in enumerate(TOPOLOGY_LAY
 TOPOLOGY_LAYER_NAMES = dict(TOPOLOGY_LAYERS)
 
 ACCESS_LAYER_TYPES = {"cdn", "waf", "eip", "dns"}
-NETWORK_LB_LAYER_TYPES = {"elb", "slb", "vpc", "nat", "vpn", "er", "cc", "cnad"}
+NETWORK_LB_LAYER_TYPES = {"elb", "slb", "vpc", "nat", "vpn", "er", "cc", "cnad", "dcaas"}
 COMPUTE_APP_LAYER_TYPES = {
     "ecs", "bms", "cce", "cci", "k8s", "kubernetes", "functiongraph",
     "apigateway", "apig", "nginx", "tomcat", "maas", "swr", "ecr",
