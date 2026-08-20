@@ -351,13 +351,29 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(get_service_key("prod-dns-entry", "default"), "dns")
         self.assertEqual(get_topology_layer("dns"), "access")
 
+    def test_cc_prefixed_resource_name_maps_to_cc(self):
+        self.assertEqual(get_service_key("CC-bandwidth-main", "default"), "cc")
+
+    def test_new_resources_map_to_expected_layers(self):
+        self.assertEqual(get_topology_layer("nat"), "network_lb")
+        self.assertEqual(get_topology_layer("cc"), "network_lb")
+        self.assertEqual(get_topology_layer("cnad"), "network_lb")
+        self.assertEqual(get_topology_layer("geminidb"), "data_middleware_storage")
+
     def test_icon_loader_matches_aliases_and_future_service_pngs(self):
         png_bytes = b"\x89PNG\r\n\x1a\n"
         old_icon_dir = converter.ICON_DIR
         old_cache = converter._ICON_DATA_URI_CACHE
 
         with tempfile.TemporaryDirectory() as icon_dir:
-            for filename in ("CCE_Deployment.png", "RDS.png", "VPC.png"):
+            for filename in (
+                "CCE_Deployment.png",
+                "RDS.png",
+                "VPC.png",
+                "CC.png",
+                "CNAD.png",
+                "GeminiDB.png",
+            ):
                 with open(os.path.join(icon_dir, filename), "wb") as f:
                     f.write(png_bytes + filename.encode("ascii"))
 
@@ -377,6 +393,9 @@ class BuildGraphAggregationTests(unittest.TestCase):
                 )
                 self.assertTrue(converter.get_service_icon_data_uri("rds"))
                 self.assertTrue(converter.get_service_icon_data_uri("vpc"))
+                self.assertTrue(converter.get_service_icon_data_uri("cc"))
+                self.assertTrue(converter.get_service_icon_data_uri("cnad"))
+                self.assertTrue(converter.get_service_icon_data_uri("geminidb"))
             finally:
                 converter.ICON_DIR = old_icon_dir
                 converter._ICON_DATA_URI_CACHE = old_cache

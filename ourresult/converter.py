@@ -40,6 +40,8 @@ SERVICE_STYLE = {
     "vpn":          ("#7F8C8D", "#424949", "roundrectangle"),
     "cdn":          ("#2980B9", "#1A5276", "ellipse"),
     "waf":          ("#C0392B", "#7B241C", "diamond"),
+    "cc":           ("#566573", "#273746", "roundrectangle"),
+    "cnad":         ("#117A65", "#0B5345", "roundrectangle"),
     "er":           ("#8E44AD", "#5B2C6F", "roundrectangle"),
     "dli":          ("#2C3E50", "#1A252F", "roundrectangle"),
     # 存储
@@ -53,6 +55,7 @@ SERVICE_STYLE = {
     "rds":          ("#3498DB", "#1A5276", "roundrectangle"),
     "dcs":          ("#E74C3C", "#922B21", "ellipse"),
     "redis":        ("#E74C3C", "#922B21", "ellipse"),
+    "geminidb":     ("#2ECC71", "#1E8449", "roundrectangle"),
     "dds":          ("#27AE60", "#1A7A43", "roundrectangle"),
     "mongodb":      ("#27AE60", "#1A7A43", "roundrectangle"),
     "gaussdb":      ("#3498DB", "#1A5276", "roundrectangle"),
@@ -94,10 +97,11 @@ SERVICE_DISPLAY_NAMES = {
     "functiongraph": "FunctionGraph",
     "vpc": "VPC", "eip": "EIP", "elb": "ELB", "slb": "SLB", "dns": "DNS",
     "nat": "NAT", "vpn": "VPN", "cdn": "CDN", "waf": "WAF",
+    "cc": "CC", "cnad": "CNAD",
     "er": "ER", "dli": "DLI",
     "oss": "OSS", "obs": "OBS", "sfs": "SFS", "sfs3": "SFS3", "evs": "EVS", "cbr": "CBR",
     "rds": "RDS", "dcs": "DCS", "redis": "Redis", "dds": "DDS",
-    "mongodb": "MongoDB", "gaussdb": "GaussDB", "dws": "DWS",
+    "geminidb": "GeminiDB", "mongodb": "MongoDB", "gaussdb": "GaussDB", "dws": "DWS",
     "css": "CSS", "elasticsearch": "Elasticsearch",
     "kafka": "Kafka", "mq": "MQ", "dms": "DMS",
     "zookeeper": "ZooKeeper", "rabbitmq": "RabbitMQ", "smn": "SMN",
@@ -118,6 +122,8 @@ SERVICE_ICON_FILES = {
     "cce_deployment": "CCE_Deployment.png",
     "cce_deploym": "CCE_Deployment.png",
     "cdn": "CDN.png",
+    "cc": "CC.png",
+    "cnad": "CNAD.png",
     "dcs": "DCS.png",
     "redis": "DCS.png",
     "dns": "DNS.png",
@@ -132,6 +138,7 @@ SERVICE_ICON_FILES = {
     "obs": "OBS.png",
     "oss": "OBS.png",
     "rds": "RDS.png",
+    "geminidb": "GeminiDB.png",
     "sfs": "SFS.png",
     "sfs3": "SFS.png",
     "vpc": "VPC.png",
@@ -267,6 +274,8 @@ NAME_PATTERNS = [
     ("cdn",        "cdn"),
     ("vpn",        "vpn"),
     ("vpc",        "vpc"),
+    ("geminidb",   "geminidb"),
+    ("cnad",       "cnad"),
     ("cce",        "cce"),
     ("cci",        "cci"),
     ("bms",        "bms"),
@@ -348,6 +357,8 @@ def get_service_key(name, type_field):
             return "k8s"
         return type_text
     name_lower = (name or "").lower()
+    if re.match(r"^cc(?:[-_]|$)", name_lower):
+        return "cc"
     for pattern, key in NAME_PATTERNS:
         if pattern in name_lower:
             return key
@@ -414,7 +425,7 @@ TOPOLOGY_LAYER_ORDER = {key: index for index, (key, _) in enumerate(TOPOLOGY_LAY
 TOPOLOGY_LAYER_NAMES = dict(TOPOLOGY_LAYERS)
 
 ACCESS_LAYER_TYPES = {"cdn", "waf", "eip", "dns"}
-NETWORK_LB_LAYER_TYPES = {"elb", "slb", "vpc", "nat", "vpn", "er"}
+NETWORK_LB_LAYER_TYPES = {"elb", "slb", "vpc", "nat", "vpn", "er", "cc", "cnad"}
 COMPUTE_APP_LAYER_TYPES = {
     "ecs", "bms", "cce", "cci", "k8s", "kubernetes", "functiongraph",
     "apigateway", "apig", "nginx", "tomcat", "maas", "swr", "ecr",
@@ -422,7 +433,7 @@ COMPUTE_APP_LAYER_TYPES = {
 DATA_MIDDLEWARE_STORAGE_LAYER_TYPES = {
     "dcs", "redis", "rds", "dds", "mongodb", "gaussdb", "dws", "css",
     "elasticsearch", "oss", "obs", "sfs", "sfs3", "evs", "cbr", "kafka", "mq",
-    "dms", "smn", "mysql", "zookeeper", "rabbitmq",
+    "dms", "smn", "mysql", "zookeeper", "rabbitmq", "geminidb",
 }
 MIDDLEWARE_NAME_RE = re.compile(
     r"(^|[^a-z0-9])(zookeeper|zoo-keeper|zk|rabbitmq|rabbit-mq|rabbit_mq|rabbit)"
