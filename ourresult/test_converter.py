@@ -364,6 +364,33 @@ class BuildGraphAggregationTests(unittest.TestCase):
             "cc",
         )
 
+    def test_cc_group_and_resource_id_map_to_network_layer(self):
+        records = [
+            make_record(
+                "svc-1",
+                service_type="default",
+                group="CC_bandwidth",
+                resource_id="id-CCAAS-001",
+            ),
+            make_record(
+                "svc-2",
+                service_type="default",
+                group="dcaas-group",
+                resource_id="id-DCAAS-002",
+            ),
+        ]
+
+        elements = build_graph(records)
+        nodes = {
+            node["name"]: node for node in element_data(elements, "nodes")
+            if not node.get("is_container")
+        }
+
+        self.assertEqual(nodes["svc-1"]["service_key"], "cc")
+        self.assertEqual(nodes["svc-2"]["service_key"], "cc")
+        self.assertEqual(nodes["svc-1"]["layer_key"], "network_lb")
+        self.assertEqual(nodes["svc-2"]["layer_key"], "network_lb")
+
     def test_new_resources_map_to_expected_layers(self):
         self.assertEqual(get_topology_layer("nat"), "network_lb")
         self.assertEqual(get_topology_layer("cc"), "network_lb")

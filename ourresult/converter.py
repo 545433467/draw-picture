@@ -338,11 +338,21 @@ def _resource_id_hint(resource_id):
     return ""
 
 
-def get_service_key(name, type_field, resource_id=""):
+def _resource_group_hint(group):
+    text = str(group or "").casefold()
+    if re.match(r"^cc(?:[-_]|$)", text):
+        return "cc"
+    return ""
+
+
+def get_service_key(name, type_field, resource_id="", group=""):
     """从 type 字段或节点名称中提取规范化服务类型键。"""
     resource_hint = _resource_id_hint(resource_id)
     if resource_hint:
         return resource_hint
+    group_hint = _resource_group_hint(group)
+    if group_hint:
+        return group_hint
     type_text = str(type_field or "").lower().strip()
     if type_text and type_text != "default":
         # ECS/BMS-hosted middleware should be grouped as middleware, not app compute.
@@ -743,7 +753,9 @@ def build_graph(records):
         )
         if not biz_text or not project_text:
             continue
-        svc_key = get_service_key(r["name"], r["type"], r.get("resource_id"))
+        svc_key = get_service_key(
+            r["name"], r["type"], r.get("resource_id"), r.get("group")
+        )
         normalized_biz = canonical_business_name(biz_text)
         biz_key = f"__business__:{normalized_biz or biz_text.casefold()}"
         prefix = extract_cce_business_prefix(r["name"])
@@ -771,7 +783,7 @@ def build_graph(records):
         grp = (r["group"]    or "").strip()
         source_biz = (r["business"] or "").strip()
         svc_key = forced_service_key or get_service_key(
-            r["name"], stype, r.get("resource_id")
+            r["name"], stype, r.get("resource_id"), r.get("group")
         )
         layer_key = get_topology_layer(svc_key, r["name"], stype)
         bg, border, shape = SERVICE_STYLE.get(
