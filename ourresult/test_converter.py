@@ -354,6 +354,16 @@ class BuildGraphAggregationTests(unittest.TestCase):
     def test_cc_prefixed_resource_name_maps_to_cc(self):
         self.assertEqual(get_service_key("CC-bandwidth-main", "default"), "cc")
 
+    def test_cc_resource_id_hint_maps_to_cc(self):
+        self.assertEqual(
+            converter.get_service_key("anything", "default", "foo-CCAAS-bar"),
+            "cc",
+        )
+        self.assertEqual(
+            converter.get_service_key("anything", "default", "foo-DCAAS-bar"),
+            "cc",
+        )
+
     def test_new_resources_map_to_expected_layers(self):
         self.assertEqual(get_topology_layer("nat"), "network_lb")
         self.assertEqual(get_topology_layer("cc"), "network_lb")
