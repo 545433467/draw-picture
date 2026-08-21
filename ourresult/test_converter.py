@@ -407,8 +407,8 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
     def test_cce_db_named_ecs_is_placed_in_data_layer(self):
         elements = build_graph([
-            make_record("cce-app", service_type="cce", targets="ecs-tidb"),
-            make_record("ecs-tidb", service_type="ecs"),
+            make_record("cce-app", service_type="cce", targets="ecs-db"),
+            make_record("ecs-db", service_type="ecs"),
             make_record("ecs-db-unrelated", service_type="ecs"),
         ])
 
@@ -427,7 +427,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         self.assertEqual(
             [resource["name"] for resource in data_node["summary_resources"]],
-            ["ecs-tidb"],
+            ["ecs-db"],
         )
         self.assertIn(
             "ecs-db-unrelated",
@@ -459,6 +459,41 @@ class BuildGraphAggregationTests(unittest.TestCase):
             edge["source"] == elb_node["id"]
             and edge["target"] == ecs_aggregate["id"]
             for edge in edges
+        ))
+
+    def test_tidb_ecs_without_links_is_in_data_layer(self):
+        records = [
+            make_record(
+                "cce-app", service_type="cce",
+                targets="elb-tidb"
+            ),
+            make_record("ecs-tidb", service_type="ecs"),
+            make_record("elb-tidb", service_type="elb", targets="ecs-tidb-backend"),
+            make_record("ecs-tidb-backend", service_type="ecs"),
+            make_record("ecs-tidb-standalone", service_type="ecs"),
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        data_aggregates = [
+            node for node in nodes
+            if node.get("type") == "__agg_compute__"
+            and node.get("layer_key") == "data_middleware_storage"
+        ]
+        self.assertTrue(any(
+            resource["name"] == "ecs-tidb"
+            for node in data_aggregates
+            for resource in node["summary_resources"]
+        ))
+        self.assertTrue(any(
+            resource["name"] == "ecs-tidb-backend"
+            for node in data_aggregates
+            for resource in node["summary_resources"]
+        ))
+        self.assertTrue(any(
+            resource["name"] == "ecs-tidb-standalone"
+            for node in data_aggregates
+            for resource in node["summary_resources"]
         ))
 
     def test_icon_loader_matches_aliases_and_future_service_pngs(self):

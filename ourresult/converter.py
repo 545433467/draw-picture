@@ -865,7 +865,10 @@ def build_graph(records):
             r["name"], stype, r.get("resource_id"), r.get("group")
         )
         layer_key = get_topology_layer(svc_key, r["name"], stype)
-        if id(r) in contextual_ecs_records:
+        if (svc_key == "ecs"
+                and "tidb" in str(r["name"] or "").casefold()):
+            layer_key = "data_middleware_storage"
+        elif id(r) in contextual_ecs_records:
             layer_key = "data_middleware_storage"
         elif id(r) in contextual_elb_records:
             layer_key = "compute_app"
