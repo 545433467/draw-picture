@@ -736,7 +736,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         rds_y = [positions[node["id"]]["y"] for node in rds_nodes]
         self.assertTrue(max(cci_y) < min(rds_y) or max(rds_y) < min(cci_y))
 
-    def test_services_in_same_layer_are_laid_out_on_one_row(self):
+    def test_data_layer_services_are_split_into_three_rows(self):
         records = [
             make_record("ecs-rabbitmq-1", service_type="ecs"),
             make_record("rds-main", service_type="rds"),
@@ -756,9 +756,25 @@ class BuildGraphAggregationTests(unittest.TestCase):
                             for name in names))
         ys = [positions[nodes[name]["id"]]["y"] for name in names]
         # 同一层内服务保持一行排开，互不重叠
-        self.assertEqual(len(set(ys)), 1)
-        xs = [positions[nodes[name]["id"]]["x"] for name in names]
-        self.assertEqual(len(set(xs)), 4)
+        self.assertEqual(len(set(ys)), 3)
+
+    def test_data_service_block_keeps_its_nodes_on_one_row(self):
+        records = [
+            make_record(f"obs-{i}", service_type="obs")
+            for i in range(1, MAX_NODES_PER_ROW + 1)
+        ]
+
+        elements = build_graph(records)
+        nodes = element_data(elements, "nodes")
+        positions = compute_bdat_positions(elements)
+        obs_nodes = [
+            node for node in nodes
+            if node.get("service_key") == "obs" and not node.get("is_container")
+        ]
+
+        self.assertEqual(
+            len({positions[node["id"]]["y"] for node in obs_nodes}), 1
+        )
 
     def test_read_excel_keeps_rows_even_when_core_column_exists(self):
         wb = openpyxl.Workbook()

@@ -565,6 +565,7 @@ _VIRTUAL_CONTAINER_TYPES = {
 # 同一业务、同一服务类型最多渲染的真实资源数。其余资源合并为一个摘要节点。
 # 布局：每行最多摆放的云资源节点数
 MAX_NODES_PER_ROW = 7
+DATA_LAYER_SERVICE_ROWS = 3
 
 # 业务关键字过滤：只绘制“所属业务”包含该关键字（不区分大小写）的业务及其节点；
 # 设为 None 表示不过滤。
@@ -1995,10 +1996,22 @@ def compute_bdat_positions(elements):
         layer_row_offsets = {}
         max_layer_w = NODE_W
         for layer_key, ordered_slots in layer_service_orders.items():
-            slot_rows = [
-                ordered_slots[i:i + SERVICES_PER_ROW]
-                for i in range(0, len(ordered_slots), SERVICES_PER_ROW)
-            ]
+            if layer_key == "data_middleware_storage":
+                row_count = min(DATA_LAYER_SERVICE_ROWS, len(ordered_slots))
+                base_size, remainder = divmod(len(ordered_slots), row_count)
+                slot_rows = []
+                cursor = 0
+                for row_index in range(row_count):
+                    current_size = base_size + (1 if row_index < remainder else 0)
+                    slot_rows.append(
+                        ordered_slots[cursor:cursor + current_size]
+                    )
+                    cursor += current_size
+            else:
+                slot_rows = [
+                    ordered_slots[i:i + SERVICES_PER_ROW]
+                    for i in range(0, len(ordered_slots), SERVICES_PER_ROW)
+                ]
             layer_rows[layer_key] = slot_rows
             layer_w = 0
             layer_h = 0
