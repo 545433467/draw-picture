@@ -405,6 +405,62 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(get_topology_layer("cnad"), "network_lb")
         self.assertEqual(get_topology_layer("geminidb"), "data_middleware_storage")
 
+    def test_cce_db_named_ecs_is_placed_in_data_layer(self):
+        elements = build_graph([
+            make_record("cce-app", service_type="cce", targets="ecs-tidb"),
+            make_record("ecs-tidb", service_type="ecs"),
+            make_record("ecs-db-unrelated", service_type="ecs"),
+        ])
+
+        aggregate_nodes = [
+            node for node in element_data(elements, "nodes")
+            if node.get("type") == "__agg_compute__"
+        ]
+        data_node = next(
+            node for node in aggregate_nodes
+            if node.get("layer_key") == "data_middleware_storage"
+        )
+        compute_node = next(
+            node for node in aggregate_nodes
+            if node.get("layer_key") == "compute_app"
+        )
+
+        self.assertEqual(
+            [resource["name"] for resource in data_node["summary_resources"]],
+            ["ecs-tidb"],
+        )
+        self.assertIn(
+            "ecs-db-unrelated",
+            [resource["name"] for resource in compute_node["summary_resources"]],
+        )
+
+    def test_cce_db_named_elb_and_its_ecs_are_relayered(self):
+        elements = build_graph([
+            make_record("cce-app", service_type="cce", targets="elb-tidb"),
+            make_record("elb-tidb", service_type="elb", targets="ecs-backend"),
+            make_record("ecs-backend", service_type="ecs"),
+        ])
+
+        nodes = element_data(elements, "nodes")
+        elb_node = next(node for node in nodes if node.get("name") == "elb-tidb")
+        ecs_aggregate = next(
+            node for node in nodes
+            if node.get("type") == "__agg_compute__"
+            and node.get("layer_key") == "data_middleware_storage"
+        )
+        edges = call_edges(elements)
+
+        self.assertEqual(elb_node["layer_key"], "compute_app")
+        self.assertEqual(
+            [resource["name"] for resource in ecs_aggregate["summary_resources"]],
+            ["ecs-backend"],
+        )
+        self.assertTrue(any(
+            edge["source"] == elb_node["id"]
+            and edge["target"] == ecs_aggregate["id"]
+            for edge in edges
+        ))
+
     def test_icon_loader_matches_aliases_and_future_service_pngs(self):
         png_bytes = b"\x89PNG\r\n\x1a\n"
         old_icon_dir = converter.ICON_DIR

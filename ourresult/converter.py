@@ -459,6 +459,7 @@ DATA_MIDDLEWARE_STORAGE_LAYER_TYPES = {
     "elasticsearch", "oss", "obs", "sfs", "sfs3", "evs", "cbr", "kafka", "mq",
     "dms", "smn", "mysql", "zookeeper", "rabbitmq", "geminidb",
 }
+DB_RESOURCE_NAME_RE = re.compile(r"(?:tidb|db)", re.IGNORECASE)
 MIDDLEWARE_NAME_RE = re.compile(
     r"(^|[^a-z0-9])(zookeeper|zoo-keeper|zk|rabbitmq|rabbit-mq|rabbit_mq|rabbit)"
     r"([^a-z0-9]|$)",
@@ -484,6 +485,76 @@ def get_topology_layer(service_key, name="", type_field=""):
 
 def get_topology_layer_name(layer_key):
     return TOPOLOGY_LAYER_NAMES.get(layer_key, TOPOLOGY_LAYER_NAMES["compute_app"])
+
+
+def _is_cce_service_record(record):
+    service_key = get_service_key(
+        record.get("name", ""), record.get("type", "default"),
+        record.get("resource_id", ""), record.get("group", ""),
+    )
+    return service_key == "cce"
+
+
+def _resource_name_matches_db(name):
+    return bool(DB_RESOURCE_NAME_RE.search(str(name or "")))
+
+
+def get_contextual_layer_overrides(records):
+    """Return resource identities whose layer depends on CCE downstream links.
+
+    A DB-named ECS directly referenced by CCE belongs to the data layer.  A
+    DB-named ELB directly referenced by CCE belongs to the compute layer, and
+    ECS resources directly referenced by that ELB belong to the data layer.
+    Only confirmed downstream links are used here; inferred-link behavior is
+    intentionally left unchanged.
+    """
+    records = list(records)
+    records_by_name = defaultdict(list)
+    for record in records:
+        records_by_name[str(record.get("name", "")).strip().casefold()].append(
+            record
+        )
+
+    ecs_data_records = set()
+    db_elb_compute_records = set()
+
+    for source in records:
+        if not _is_cce_service_record(source):
+            continue
+        for target_name in split_target_names(source.get("targets", "")):
+            targets = records_by_name.get(str(target_name).strip().casefold(), [])
+            for target in targets:
+                target_service = get_service_key(
+                    target.get("name", ""), target.get("type", "default"),
+                    target.get("resource_id", ""), target.get("group", ""),
+                )
+                if target_service == "ecs":
+                    if _resource_name_matches_db(target.get("name", "")):
+                        ecs_data_records.add(id(target))
+                    continue
+
+                if target_service not in {"elb", "slb"}:
+                    continue
+                if not _resource_name_matches_db(target.get("name", "")):
+                    continue
+
+                db_elb_compute_records.add(id(target))
+                for downstream_name in split_target_names(
+                        target.get("targets", "")
+                ):
+                    for downstream in records_by_name.get(
+                            str(downstream_name).strip().casefold(), []
+                    ):
+                        downstream_service = get_service_key(
+                            downstream.get("name", ""),
+                            downstream.get("type", "default"),
+                            downstream.get("resource_id", ""),
+                            downstream.get("group", ""),
+                        )
+                        if downstream_service == "ecs":
+                            ecs_data_records.add(id(downstream))
+
+    return ecs_data_records, db_elb_compute_records
 
 
 # 这些类型作为 compound 容器节点（自动生成，不直接来自行数据）
@@ -738,6 +809,9 @@ def build_graph(records):
     edges = []
     edge_lookup = {}
     edge_count = [0]
+    contextual_ecs_records, contextual_elb_records = (
+        get_contextual_layer_overrides(records)
+    )
 
     # ── 1. 规划资源可见性 ──────────────────────────────────────────────────
     # 聚合键是 (业务键, 服务类型)。未填写业务的资源按服务类型生成虚拟业务，
@@ -790,6 +864,10 @@ def build_graph(records):
             r["name"], stype, r.get("resource_id"), r.get("group")
         )
         layer_key = get_topology_layer(svc_key, r["name"], stype)
+        if id(r) in contextual_ecs_records:
+            layer_key = "data_middleware_storage"
+        elif id(r) in contextual_elb_records:
+            layer_key = "compute_app"
         bg, border, shape = SERVICE_STYLE.get(
             svc_key, SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
         )
@@ -1404,7 +1482,7 @@ def build_graph(records):
                 or "(未设置资源分组)"
             )
             gkey = glabel.casefold()
-            meta = agg_meta.setdefault((biz_key, gkey), {
+            meta = agg_meta.setdefault((biz_key, gkey, layer_key), {
                 "count": 0, "resources": [], "layer_key": layer_key,
                 "label": glabel, "svc_keys": set(),
             })
@@ -1435,7 +1513,7 @@ def build_graph(records):
                     (entry["data"].get("group_label") or "").strip()
                     or "(未设置资源分组)"
                 )
-                agg_key = (biz_key, glabel.casefold())
+                agg_key = (biz_key, glabel.casefold(), layer_key)
                 if agg_key in agg_compute_ids:
                     continue
                 meta = agg_meta[agg_key]
@@ -1628,7 +1706,8 @@ def build_graph(records):
                 or "(未设置资源分组)".casefold()
             )
             return agg_compute_ids.get(
-                (entry["data"]["business_key"], gkey), ""
+                (entry["data"]["business_key"], gkey,
+                 entry["data"].get("layer_key", "compute_app")), ""
             )
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
@@ -1647,7 +1726,8 @@ def build_graph(records):
                 or "(未设置资源分组)".casefold()
             )
             return agg_compute_ids.get(
-                (entry["data"]["business_key"], gkey), ""
+                (entry["data"]["business_key"], gkey,
+                 entry["data"].get("layer_key", "compute_app")), ""
             )
         if entry["group_key"]:
             return group_info[entry["group_key"]]["first_id"]
