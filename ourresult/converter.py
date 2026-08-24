@@ -2974,32 +2974,6 @@ var cy = cytoscape({{
 
 setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
 
-// When containers are locked, dragging an empty area inside a business/layer
-// frame pans the viewport instead of selecting/grabbing the compound node.
-var _lockedCanvasPan = null;
-var _cyCanvas = document.getElementById('cy');
-_cyCanvas.addEventListener('pointerdown', function(event) {{
-  if (!_containersLocked || event.button !== 0) return;
-  var rect = _cyCanvas.getBoundingClientRect();
-  var x = event.clientX - rect.left, y = event.clientY - rect.top;
-  var hits = cy.elementsAtPoint(x, y);
-  var nodes = hits.nodes();
-  var resourceHit = nodes.filter(function(n) {{ return !n.data('is_container'); }});
-  var containerHit = nodes.filter(function(n) {{ return n.data('is_container'); }});
-  if (resourceHit.length || !containerHit.length) return;
-  var pan = cy.pan();
-  _lockedCanvasPan = {{startX:event.clientX, startY:event.clientY,
-                       panX:pan.x, panY:pan.y}};
-  event.preventDefault();
-}});
-document.addEventListener('pointermove', function(event) {{
-  if (!_lockedCanvasPan) return;
-  cy.pan({{x:_lockedCanvasPan.panX + event.clientX - _lockedCanvasPan.startX,
-          y:_lockedCanvasPan.panY + event.clientY - _lockedCanvasPan.startY}});
-  event.preventDefault();
-}});
-document.addEventListener('pointerup', function() {{ _lockedCanvasPan = null; }});
-
 // ── 事件：点击节点 ─────────────────────────────────────────────────────────
 cy.on('tap', 'node', function(evt) {{
   var d  = evt.target.data();
@@ -3564,6 +3538,12 @@ function addResourceNode() {{
     }}}});
   }});
   biz.data('resource_total', (biz.data('resource_total') || 0) + 1);
+  if (_containersLocked) {{
+    cy.nodes('[is_container = 1]').forEach(function(container) {{
+      container.ungrabify();
+      container.style('events', 'no');
+    }});
+  }}
   closeNodeEditor();
   cy.resize();
   cy.fit(undefined, 50);
@@ -3604,8 +3584,18 @@ function toggleContainerLock() {{
   _containersLocked = !_containersLocked;
   var containers = cy.nodes('[is_container = 1]');
   containers.forEach(function(n) {{
-    if (_containersLocked) n.ungrabify(); else n.grabify();
+    if (_containersLocked) {{
+      n.ungrabify();
+      // Let the renderer treat the compound frame as transparent. Pointer
+      // drags then reach the Cytoscape canvas and pan the viewport, including
+      // when the pointer starts on empty space inside a business frame.
+      n.style('events', 'no');
+    }} else {{
+      n.grabify();
+      n.style('events', 'yes');
+    }}
   }});
+  cy.userPanningEnabled(true);
   var btn = document.getElementById('lockContainersBtn');
   btn.classList.toggle('locked', _containersLocked);
   btn.innerHTML = _containersLocked ? '&#128274; 锁定容器:开' : '&#128275; 锁定容器:关';
