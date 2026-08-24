@@ -573,6 +573,7 @@ _VIRTUAL_CONTAINER_TYPES = {
 # 布局：每行最多摆放的云资源节点数
 MAX_NODES_PER_ROW = 7
 DATA_LAYER_SERVICE_ROWS = 3
+EXTRACTED_RIGHT_GAP = 520
 
 # 业务关键字过滤：只绘制“所属业务”包含该关键字（不区分大小写）的业务及其节点；
 # 设为 None 表示不过滤。
@@ -2121,6 +2122,16 @@ def compute_bdat_positions(elements):
             "layer_rows": layer_rows,
             "row_offsets": layer_row_offsets,
         }
+        extracted_count = sum(
+            len(nodes) for (layer_key, service_key), nodes in services.items()
+            if service_key in EXTRACTED_FROM_LAYER_TYPES
+        )
+        if extracted_count:
+            # Reserve room for the right-hand extracted-resource rail so
+            # neighboring business frames cannot overlap it.
+            max_layer_w += EXTRACTED_RIGHT_GAP + min(
+                extracted_count, MAX_ROW_NODES
+            ) * NODE_W
         group_sizes[biz_key] = (max_layer_w + 2 * GROUP_PAD, group_h)
 
     # 计算网格各列最大宽度、各行最大高度
@@ -2193,6 +2204,43 @@ def compute_bdat_positions(elements):
                                 }
                         group_x += g_w + GROUP_GAP
                     service_x = next_service_x
+
+        # VPC/CC/NAT/DCAAS are business-owned but intentionally outside the
+        # architecture-layer containers. Move their resources into a clearly
+        # separated right-hand rail after the normal layer layout is computed.
+        extracted_ids = [
+            nid for nid in biz_groups[biz_key]
+            if leaf_nodes[nid].get("service_key") in EXTRACTED_FROM_LAYER_TYPES
+        ]
+        if extracted_ids:
+            normal_points = [
+                positions[nid] for nid in biz_groups[biz_key]
+                if nid in positions and nid not in extracted_ids
+            ]
+            normal_max_x = max((point["x"] for point in normal_points), default=base_x)
+            normal_min_y = min((point["y"] for point in normal_points), default=base_y)
+            lane_x = normal_max_x + EXTRACTED_RIGHT_GAP
+            lane_y = normal_min_y
+            lane_cursor = lane_x
+            lane_slots = []
+            for service_key in dict.fromkeys(
+                    leaf_nodes[nid].get("service_key") for nid in extracted_ids):
+                slot_nodes = [
+                    nid for nid in extracted_ids
+                    if leaf_nodes[nid].get("service_key") == service_key
+                ]
+                lane_slots.append(slot_nodes)
+            for slot_nodes in lane_slots:
+                for index, node_id in enumerate(slot_nodes):
+                    row, column = divmod(index, MAX_ROW_NODES)
+                    positions[node_id] = {
+                        "x": round(lane_cursor + column * NODE_W, 1),
+                        "y": round(lane_y + row * ROW_H, 1),
+                    }
+                lane_cursor += (
+                    min(len(slot_nodes), MAX_ROW_NODES) * NODE_W
+                    + SERVICE_GAP
+                )
 
     # 数字徽标跟随其锚点（聚合缩略节点），显示在其右上方。
     for nid, data in badge_nodes.items():
@@ -2724,6 +2772,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   background:rgba(255,255,255,.15);color:#fff;font-size:12px;width:150px;outline:none}}
 #searchBox::placeholder{{color:rgba(255,255,255,.55)}}
 #lockContainersBtn.locked{{background:rgba(231,76,60,.45);border-color:#ffb3aa}}
+#lockContainersBtn{{font-size:14px;font-weight:700;padding:6px 12px}}
 #layoutSelect{{padding:4px 8px;border-radius:4px;border:1px solid rgba(255,255,255,.3);
   background:rgba(255,255,255,.15);color:#fff;font-size:12px;cursor:pointer}}
 #layoutSelect option{{background:#283593}}
@@ -2820,6 +2869,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 .editor-actions{{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}}
 .editor-actions button{{cursor:pointer;padding:6px 14px;border-radius:4px;border:1px solid #cbd5e1;background:#fff;color:#334155}}
 .editor-actions .primary{{border-color:#283593;background:#283593;color:#fff}}
+#addResourceBtn{{font-size:14px;font-weight:700;background:rgba(52,152,219,.45);padding:6px 12px}}
 .edit-hint{{font-size:11px;color:#64748b;margin-top:8px;line-height:1.4}}
 </style>
 </head>
@@ -2833,6 +2883,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <div class="sep"></div>
   <button id="bizToggleBtn" class="tb-btn" onclick="toggleBusinessView()" style="background:rgba(26,188,156,.35)">&#127968; 业务分组:开</button>
   <button id="lockContainersBtn" class="tb-btn" onclick="toggleContainerLock()" title="锁定或解锁所有业务/层/服务框">&#128274; 锁定容器:关</button>
+  <button id="addResourceBtn" class="tb-btn" onclick="openAddNodeEditor()" title="添加资源并生成新节点">&#43; 新增资源</button>
   <button class="tb-btn" onclick="downloadEditedCsv()" title="下载当前编辑后的资源表">&#128190; 导出编辑表</button>
   <div class="sep"></div>
   <select id="layoutSelect" onchange="changeLayout(this.value)">
@@ -2922,6 +2973,32 @@ var cy = cytoscape({{
 }});
 
 setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
+
+// When containers are locked, dragging an empty area inside a business/layer
+// frame pans the viewport instead of selecting/grabbing the compound node.
+var _lockedCanvasPan = null;
+var _cyCanvas = document.getElementById('cy');
+_cyCanvas.addEventListener('pointerdown', function(event) {{
+  if (!_containersLocked || event.button !== 0) return;
+  var rect = _cyCanvas.getBoundingClientRect();
+  var x = event.clientX - rect.left, y = event.clientY - rect.top;
+  var hits = cy.elementsAtPoint(x, y);
+  var nodes = hits.nodes();
+  var resourceHit = nodes.filter(function(n) {{ return !n.data('is_container'); }});
+  var containerHit = nodes.filter(function(n) {{ return n.data('is_container'); }});
+  if (resourceHit.length || !containerHit.length) return;
+  var pan = cy.pan();
+  _lockedCanvasPan = {{startX:event.clientX, startY:event.clientY,
+                       panX:pan.x, panY:pan.y}};
+  event.preventDefault();
+}});
+document.addEventListener('pointermove', function(event) {{
+  if (!_lockedCanvasPan) return;
+  cy.pan({{x:_lockedCanvasPan.panX + event.clientX - _lockedCanvasPan.startX,
+          y:_lockedCanvasPan.panY + event.clientY - _lockedCanvasPan.startY}});
+  event.preventDefault();
+}});
+document.addEventListener('pointerup', function() {{ _lockedCanvasPan = null; }});
 
 // ── 事件：点击节点 ─────────────────────────────────────────────────────────
 cy.on('tap', 'node', function(evt) {{
@@ -3323,6 +3400,26 @@ var EDITABLE_FIELDS = [
   ['targets', '下游服务（逗号分隔）', 'textarea'],
   ['desc', '描述', 'textarea']
 ];
+var _editorMode = 'edit';
+
+function openAddNodeEditor() {{
+  _editorMode = 'add';
+  window._editingNodeId = null;
+  var fields = document.getElementById('editor-fields');
+  var defaults = {{name:'', type:'ecs', business:'chat', group_label:'',
+                   resource_id:'', enterprise_project:'', region:'', spec:'',
+                   targets:'', desc:''}};
+  fields.innerHTML = EDITABLE_FIELDS.map(function(field) {{
+    var key = field[0], label = field[1], kind = field[2];
+    var control = kind === 'textarea'
+      ? '<textarea id="edit-' + key + '">' + escHtml(defaults[key]) + '</textarea>'
+      : '<input id="edit-' + key + '" value="' + escAttr(defaults[key]) + '" />';
+    return '<div class="edit-field ' + (kind === 'textarea' ? 'full' : '') + '">' +
+      '<label for="edit-' + key + '">' + label + '</label>' + control + '</div>';
+  }}).join('');
+  document.getElementById('editor-title').textContent = '新增资源节点';
+  document.getElementById('editor-modal').classList.add('open');
+}}
 
 function openNodeEditor() {{
   var id = window._activeNodeId;
@@ -3350,10 +3447,15 @@ function openNodeEditor() {{
 function closeNodeEditor() {{
   document.getElementById('editor-modal').classList.remove('open');
   window._editingNodeId = null;
+  _editorMode = 'edit';
 }}
 
 function saveNodeEdit(event) {{
   event.preventDefault();
+  if (_editorMode === 'add') {{
+    addResourceNode();
+    return;
+  }}
   var node = window._editingNodeId ? cy.getElementById(window._editingNodeId) : cy.collection();
   if (!node || node.empty()) return closeNodeEditor();
   var updated = {{}};
@@ -3370,6 +3472,102 @@ function saveNodeEdit(event) {{
   closeNodeEditor();
   showNodeDetail(node.data(), node.data('bg_color') || '#888');
   showToast('节点已更新，拓扑已重新渲染');
+}}
+
+var SERVICE_COLORS = {{
+  ecs:['#FF6B35','#C0441F'], cce:['#4A90D9','#2C5F8A'], cci:['#5BA3E0','#2C5F8A'],
+  vpc:['#F0F3FA','#3B6FB6'], nat:['#5D6D7E','#2E4057'], cc:['#566573','#273746'],
+  dcaas:['#AED6F1','#5D8AA8'], cnad:['#117A65','#0B5345'], waf:['#C0392B','#7B241C'],
+  elb:['#16A085','#0E6655'], default:['#AED6F1','#5D8AA8']
+}};
+var SERVICE_LABELS = {{ecs:'ECS', cce:'CCE', cci:'CCI', vpc:'VPC', nat:'NAT', cc:'CC',
+  dcaas:'DCAAS', cnad:'CNAD', waf:'WAF', elb:'ELB'}};
+
+function getLayerForService(service) {{
+  if (['cnad','cdn','waf','eip','dns'].indexOf(service) >= 0) return 'access';
+  if (['vpc','dcaas','nat','cc','elb','slb','vpn','er'].indexOf(service) >= 0) return 'network_lb';
+  if (['rds','dcs','redis','dds','obs','oss','kafka','mq','dms','sfs','evs'].indexOf(service) >= 0) return 'data_middleware_storage';
+  return 'compute_app';
+}}
+var LAYER_LABELS = {{access:'渠道接入与安全边界', network_lb:'网络与负载均衡层',
+  compute_app:'计算、容器与应用服务层', data_middleware_storage:'中间件、数据与存储层'}};
+
+function findNodeByData(key, value) {{
+  var result = cy.collection();
+  cy.nodes().forEach(function(n) {{ if (n.data(key) === value) result.merge(n); }});
+  return result.first();
+}}
+
+function addResourceNode() {{
+  var values = {{}};
+  EDITABLE_FIELDS.forEach(function(field) {{
+    var input = document.getElementById('edit-' + field[0]);
+    values[field[0]] = input ? input.value.trim() : '';
+  }});
+  if (!values.name) {{ showToast('资源名称不能为空'); return; }}
+  var service = (values.type || 'default').toLowerCase().split(/[-_./:\\s]+/)[0];
+  var layer = getLayerForService(service);
+  var business = values.business || 'chat';
+  var businessKey = '__business__:' + business.toLowerCase().replace(/[\\s_-]+/g, '-');
+  var biz = findNodeByData('business_key', businessKey);
+  if (biz.empty()) {{
+    var bizId = 'biz_dynamic_' + Date.now();
+    biz = cy.add({{ group:'nodes', data: {{id:bizId, name:business, business_key:businessKey,
+      type:'__business__', is_container:1, resource_total:0, bg_color:'#E8F8F5',
+      border_color:'#1ABC9C', text_color:'#0E6655', shape:'roundrectangle'}} }});
+    biz.position({{x: cy.nodes().length * 80, y: 160}});
+  }}
+  var expectedParent = biz;
+  if (['vpc','dcaas','nat','cc'].indexOf(service) < 0) {{
+    var layerNode = findNodeByData('layer_key', layer);
+    if (!layerNode.empty() && layerNode.data('business_key') === businessKey) expectedParent = layerNode;
+    if (expectedParent === biz) {{
+      var layerId = 'layer_dynamic_' + layer + '_' + Date.now();
+      expectedParent = cy.add({{group:'nodes', data: {{id:layerId, name:LAYER_LABELS[layer],
+        layer_key:layer, layer_name:LAYER_LABELS[layer], business_key:businessKey,
+        type:'__layer__', is_container:1, resource_total:0, min_width:240,
+        bg_color:'#F7F9FC', border_color:'#5D6D7E', shape:'roundrectangle', parent:biz.id()}}}});
+      expectedParent.position({{x:biz.position('x'), y:biz.position('y') + 140}});
+    }}
+  }}
+  var serviceContainer = cy.collection();
+  cy.nodes().forEach(function(n) {{
+    if (n.data('type') === '__service__' && n.data('service_key') === service &&
+        n.parent().id() === expectedParent.id()) serviceContainer = n;
+  }});
+  if (serviceContainer.empty() && service !== 'default') {{
+    var parent = expectedParent;
+    var serviceId = 'sc_dynamic_' + service + '_' + Date.now();
+    serviceContainer = cy.add({{group:'nodes', data: {{id:serviceId, name:SERVICE_LABELS[service] || service.toUpperCase(),
+      type:'__service__', service_key:service, layer_key:layer, layer_name:LAYER_LABELS[layer],
+      business_key:businessKey, is_container:1, parent:parent.id(), min_width:88,
+      bg_color:'#F2F3F4', border_color:'#7F8C8D', shape:'roundrectangle'}}}});
+    serviceContainer.position({{x:biz.position('x') + 120, y:biz.position('y') + 120}});
+  }}
+  var colors = SERVICE_COLORS[service] || SERVICE_COLORS.default;
+  var nodeId = 'n_dynamic_' + Date.now();
+  var parentId = serviceContainer.empty() ? biz.id() : serviceContainer.id();
+  var node = cy.add({{group:'nodes', data: {{id:nodeId, name:values.name, display_label:(SERVICE_LABELS[service] || service.toUpperCase()) + '\\n' + values.name,
+    type:values.type || 'default', service_key:service, layer_key:layer, layer_name:LAYER_LABELS[layer],
+    business:business, business_key:businessKey, group_label:values.group_label, resource_id:values.resource_id,
+    enterprise_project:values.enterprise_project, region:values.region, spec:values.spec, desc:values.desc,
+    targets:values.targets, bg_color:colors[0], border_color:colors[1], shape:'roundrectangle',
+    is_container:0, is_summary:0, is_grouped_resource:1, parent:parentId}}}});
+  var parentPosition = serviceContainer.empty() ? biz.position() : serviceContainer.position();
+  node.position({{x:parentPosition.x + 120, y:parentPosition.y + 80}});
+  values.targets.split(/[,，;；\\r\\n]+/).forEach(function(targetName, index) {{
+    var target = findNodeByData('name', targetName.trim());
+    if (!target.empty() && target.id() !== node.id()) cy.add({{group:'edges', data: {{
+      id:'e_dynamic_' + Date.now() + '_' + index, source:node.id(), target:target.id(),
+      source_name:values.name, target_name:targetName.trim(), relation:'调用', call_count:1,
+      color:'#3498DB', inferred:0, cross_business:target.data('business_key') !== businessKey
+    }}}});
+  }});
+  biz.data('resource_total', (biz.data('resource_total') || 0) + 1);
+  closeNodeEditor();
+  cy.resize();
+  cy.fit(undefined, 50);
+  showToast('资源已添加并重新渲染到拓扑图');
 }}
 
 function escAttr(s) {{
