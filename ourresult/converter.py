@@ -937,6 +937,9 @@ def build_graph(records):
             "region":        reg,
             "group_label":   grp,
             "source":        r.get("source", ""),
+            # Keep the original downstream field on each rendered resource so
+            # the in-page editor can prefill it from the Excel source.
+            "targets":       r.get("targets", "") or "",
             "business":      biz_label,
             "business_key":  biz_key,
             "source_business": (r["business"] or "").strip(),
@@ -1313,6 +1316,7 @@ def build_graph(records):
             "desc": d.get("desc", ""),
             "downstream": split_target_names(r.get("targets", "")),
             "inferred_downstream": split_target_names(r.get("inferred_targets", "")),
+            "downstream_text": r.get("targets", "") or "",
         }
 
     # 摘要节点：隐藏资源按“资源分组”值拆分，每个资源分组一个摘要节点，
@@ -2038,7 +2042,17 @@ def compute_bdat_positions(elements):
         layer_row_offsets = {}
         max_layer_w = NODE_W
         for layer_key, ordered_slots in layer_service_orders.items():
-            if layer_key == "data_middleware_storage":
+            has_in_layer_chain = any(
+                target_key in adjacency[source_key]
+                for source_key in ordered_slots
+                for target_key in ordered_slots
+            )
+            if has_in_layer_chain:
+                # A service-level dependency chain reads more clearly as a
+                # vertical pipeline: source service at the top, downstream
+                # service below it. Independent slots keep the compact grid.
+                slot_rows = [[slot] for slot in ordered_slots]
+            elif layer_key == "data_middleware_storage":
                 row_count = min(DATA_LAYER_SERVICE_ROWS, len(ordered_slots))
                 base_size, remainder = divmod(len(ordered_slots), row_count)
                 slot_rows = []
@@ -3156,6 +3170,7 @@ var SUMMARY_COLUMNS = [
   ['ep', '企业项目'],
   ['business', '所属业务'],
   ['group', '资源分组'],
+  ['downstream', '下游服务'],
 ];
 
 function summaryRow(item) {{
@@ -3166,6 +3181,7 @@ function summaryRow(item) {{
     ep: item.enterprise_project || item.project || '-',
     business: item.business || '-',
     group: item.group || '-',
+    downstream: item.downstream_text || (item.downstream || []).join(', ') || '-',
   }};
 }}
 
@@ -3442,6 +3458,7 @@ function saveNodeEdit(event) {{
   node.data('display_label', type + '\\n' + (updated.name || node.data('name') || ''));
   node.data('service_key', (updated.type || node.data('service_key') || 'default').toLowerCase());
   node.data('source_business', updated.business || node.data('source_business') || '');
+  rebuildOutgoingEdges(node, updated.targets);
   try {{ localStorage.setItem('topology-node-' + node.id(), JSON.stringify(node.data())); }} catch (ignore) {{}}
   closeNodeEditor();
   showNodeDetail(node.data(), node.data('bg_color') || '#888');
@@ -3470,6 +3487,25 @@ function findNodeByData(key, value) {{
   var result = cy.collection();
   cy.nodes().forEach(function(n) {{ if (n.data(key) === value) result.merge(n); }});
   return result.first();
+}}
+
+function rebuildOutgoingEdges(sourceNode, targetText) {{
+  // Rebuild only user/resource call edges; fixed architecture edges remain.
+  sourceNode.outgoers('edge').filter(function(edge) {{
+    return !edge.data('layer_relation');
+  }}).remove();
+  String(targetText || '').split(/[,，;；\\r\\n]+/).forEach(function(targetName, index) {{
+    targetName = targetName.trim();
+    if (!targetName) return;
+    var target = findNodeByData('name', targetName);
+    if (target.empty() || target.id() === sourceNode.id()) return;
+    cy.add({{group:'edges', data: {{
+      id:'e_dynamic_' + Date.now() + '_' + index + '_' + Math.random().toString(36).slice(2),
+      source:sourceNode.id(), target:target.id(), source_name:sourceNode.data('name'),
+      target_name:targetName, relation:'调用', call_count:1, color:'#3498DB',
+      inferred:0, cross_business:target.data('business_key') !== sourceNode.data('business_key')
+    }}}});
+  }});
 }}
 
 function addResourceNode() {{
@@ -3529,14 +3565,7 @@ function addResourceNode() {{
     is_container:0, is_summary:0, is_grouped_resource:1, parent:parentId}}}});
   var parentPosition = serviceContainer.empty() ? biz.position() : serviceContainer.position();
   node.position({{x:parentPosition.x + 120, y:parentPosition.y + 80}});
-  values.targets.split(/[,，;；\\r\\n]+/).forEach(function(targetName, index) {{
-    var target = findNodeByData('name', targetName.trim());
-    if (!target.empty() && target.id() !== node.id()) cy.add({{group:'edges', data: {{
-      id:'e_dynamic_' + Date.now() + '_' + index, source:node.id(), target:target.id(),
-      source_name:values.name, target_name:targetName.trim(), relation:'调用', call_count:1,
-      color:'#3498DB', inferred:0, cross_business:target.data('business_key') !== businessKey
-    }}}});
-  }});
+  rebuildOutgoingEdges(node, values.targets);
   biz.data('resource_total', (biz.data('resource_total') || 0) + 1);
   if (_containersLocked) {{
     cy.nodes('[is_container = 1]').forEach(function(container) {{
@@ -3698,18 +3727,30 @@ def main():
   py converter.py sample.xlsx
   py converter.py my_services.xlsx output.html
   py converter.py my_services.xlsx --title "生产环境拓扑"
+  py converter.py my_services.xlsx --output-dir ./dist
 """
     )
     parser.add_argument("excel", help="输入 Excel 文件路径")
     parser.add_argument("output", nargs="?", default=None,
                         help="输出 HTML 文件路径（默认同名 .html）")
     parser.add_argument("--title", default="云服务拓扑图", help="页面标题")
+    parser.add_argument("--output-dir", default=None,
+                        help="输出目录；未指定时沿用输入文件目录或 output 参数目录")
     args = parser.parse_args()
 
     if not os.path.exists(args.excel):
         sys.exit(f"文件不存在: {args.excel}")
 
-    output = args.output or (os.path.splitext(args.excel)[0] + ".html")
+    if args.output:
+        output = args.output
+    else:
+        output = os.path.splitext(args.excel)[0] + ".html"
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        output = os.path.join(
+            args.output_dir,
+            os.path.basename(output),
+        )
 
     print(f"读取 Excel: {args.excel}")
     records = read_excel(args.excel)
