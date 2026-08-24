@@ -448,8 +448,11 @@ TOPOLOGY_LAYERS = [
 TOPOLOGY_LAYER_ORDER = {key: index for index, (key, _) in enumerate(TOPOLOGY_LAYERS)}
 TOPOLOGY_LAYER_NAMES = dict(TOPOLOGY_LAYERS)
 
-ACCESS_LAYER_TYPES = {"cdn", "waf", "eip", "dns"}
-NETWORK_LB_LAYER_TYPES = {"elb", "slb", "vpc", "nat", "vpn", "er", "cc", "cnad", "dcaas"}
+ACCESS_LAYER_TYPES = {"cdn", "waf", "eip", "dns", "cnad"}
+NETWORK_LB_LAYER_TYPES = {"elb", "slb", "vpn", "er"}
+# These network resources remain inside the business compound node, but are
+# intentionally rendered outside the second architecture-layer container.
+EXTRACTED_FROM_LAYER_TYPES = {"vpc", "dcaas", "nat", "cc"}
 COMPUTE_APP_LAYER_TYPES = {
     "ecs", "bms", "cce", "cci", "k8s", "kubernetes", "functiongraph",
     "apigateway", "apig", "nginx", "tomcat", "maas", "swr", "ecr",
@@ -476,6 +479,10 @@ def get_topology_layer(service_key, name="", type_field=""):
         return "data_middleware_storage"
     if service in ACCESS_LAYER_TYPES:
         return "access"
+    if service in EXTRACTED_FROM_LAYER_TYPES:
+        # Keep the logical network classification for relationships and
+        # ordering, while the parent assignment renders it outside the layer.
+        return "network_lb"
     if service in NETWORK_LB_LAYER_TYPES:
         return "network_lb"
     if service in COMPUTE_APP_LAYER_TYPES:
@@ -1427,6 +1434,8 @@ def build_graph(records):
         )
         if business_meta[biz_key]["is_virtual"]:
             continue
+        if svc_key in EXTRACTED_FROM_LAYER_TYPES:
+            continue
         layers_by_business[biz_key].add(layer_key)
         layer_totals[(biz_key, layer_key)] += len(info)
 
@@ -1512,6 +1521,34 @@ def build_graph(records):
 
         is_virtual = business_meta[biz_key]["is_virtual"]
         if svc_key in AGGREGATE_SERVICE_KEYS:
+            # Aggregated ECS/CCE resources still get a visible service frame so
+            # the architecture diagram shows their ownership explicitly.
+            if not is_virtual:
+                sc_key = (biz_key, layer_key, svc_key)
+                if sc_key not in service_container_ids:
+                    sc_id = f"sc_{biz_id}_{safe_id(layer_key)}_{safe_id(svc_key)}"
+                    service_container_ids[sc_key] = sc_id
+                    agg = service_agg[sc_key]
+                    service_containers.append({"group": "nodes", "data": {
+                        "id": sc_id,
+                        "name": get_service_display_name(svc_key),
+                        "min_width": container_min_width(
+                            get_service_display_name(svc_key), font_size=22
+                        ),
+                        "type": "__service__",
+                        "service_key": svc_key,
+                        "layer_key": layer_key,
+                        "layer_name": get_topology_layer_name(layer_key),
+                        "resource_total": agg["resource_total"],
+                        "visible_count": agg["visible_count"],
+                        "collapsed_count": agg["collapsed_count"],
+                        "is_container": 1,
+                        "parent": (biz_id if svc_key in EXTRACTED_FROM_LAYER_TYPES
+                                   else layer_map[(biz_key, layer_key)]),
+                        "bg_color": "#F2F3F4",
+                        "border_color": "#7F8C8D",
+                        "shape": "roundrectangle",
+                    }})
             for entry in info:
                 glabel = (
                     (entry["data"].get("group_label") or "").strip()
@@ -1521,15 +1558,15 @@ def build_graph(records):
                 if agg_key in agg_compute_ids:
                     continue
                 meta = agg_meta[agg_key]
-                agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
-                agg_compute_ids[agg_key] = agg_id
-                agg_parent = (
-                    biz_id if is_virtual
-                    else layer_map[(biz_key, meta["layer_key"])]
-                )
                 primary_svc = (
                     "cce" if "cce" in meta["svc_keys"]
                     else next(iter(meta["svc_keys"]))
+                )
+                agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
+                agg_compute_ids[agg_key] = agg_id
+                agg_parent = (
+                    biz_id if is_virtual or meta["layer_key"] in EXTRACTED_FROM_LAYER_TYPES
+                    else service_container_ids[(biz_key, meta["layer_key"], primary_svc)]
                 )
                 service_label = "/".join(
                     get_service_display_name(s) for s in sorted(meta["svc_keys"])
@@ -1567,7 +1604,7 @@ def build_graph(records):
         if is_virtual:
             continue
 
-        layer_id = layer_map[(biz_key, layer_key)]
+        layer_id = layer_map.get((biz_key, layer_key))
         sc_key = (biz_key, layer_key, svc_key)
         sc_id = None
         # 虚拟业务框本身已经代表服务类型，不再重复嵌套同名服务框。
@@ -1590,7 +1627,8 @@ def build_graph(records):
                     "visible_count":   agg["visible_count"],
                     "collapsed_count": agg["collapsed_count"],
                     "is_container":    1,
-                    "parent":          layer_id,
+                    "parent":          (biz_id if svc_key in EXTRACTED_FROM_LAYER_TYPES
+                                        else layer_id),
                     "bg_color":        "#F2F3F4",
                     "border_color":    "#7F8C8D",
                     "shape":           "roundrectangle",
@@ -2685,6 +2723,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 #searchBox{{padding:4px 8px;border-radius:4px;border:1px solid rgba(255,255,255,.4);
   background:rgba(255,255,255,.15);color:#fff;font-size:12px;width:150px;outline:none}}
 #searchBox::placeholder{{color:rgba(255,255,255,.55)}}
+#lockContainersBtn.locked{{background:rgba(231,76,60,.45);border-color:#ffb3aa}}
 #layoutSelect{{padding:4px 8px;border-radius:4px;border:1px solid rgba(255,255,255,.3);
   background:rgba(255,255,255,.15);color:#fff;font-size:12px;cursor:pointer}}
 #layoutSelect option{{background:#283593}}
@@ -2694,6 +2733,9 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 .stat-dot{{width:8px;height:8px;border-radius:50%;display:inline-block}}
 /* ── 主区域 ── */
 #cy{{position:fixed;top:50px;left:0;right:280px;bottom:0;background:#fff}}
+#clear-highlight-float{{position:fixed;display:none;z-index:40;cursor:pointer;
+  padding:3px 8px;border:1px solid #c0392b;border-radius:12px;background:#E74C3C;
+  color:#fff;font-size:11px;box-shadow:0 2px 6px rgba(0,0,0,.25)}}
 /* ── 侧边栏 ── */
 #sidebar{{position:fixed;top:50px;right:0;width:280px;bottom:0;background:#fff;
   border-left:1px solid #e0e0e0;display:flex;flex-direction:column;overflow:hidden}}
@@ -2762,6 +2804,23 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   letter-spacing:.5px;margin-bottom:4px}}
 .sum-info-value{{font-size:15px;font-weight:700;color:#2C3E50;
   word-break:break-all}}
+/* ── 节点编辑器 ── */
+#editor-modal{{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;
+  align-items:center;justify-content:center;z-index:200}}
+#editor-modal.open{{display:flex}}
+#editor-card{{width:min(560px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:auto;
+  background:#fff;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.28);padding:18px}}
+#editor-card h2{{font-size:17px;color:#283593;margin-bottom:14px}}
+.edit-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px}}
+.edit-field{{display:flex;flex-direction:column;gap:4px}}
+.edit-field.full{{grid-column:1 / -1}}
+.edit-field label{{font-size:11px;color:#64748b}}
+.edit-field input,.edit-field textarea{{border:1px solid #cbd5e1;border-radius:4px;padding:7px 8px;font:12px inherit;color:#1e293b}}
+.edit-field textarea{{min-height:64px;resize:vertical}}
+.editor-actions{{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}}
+.editor-actions button{{cursor:pointer;padding:6px 14px;border-radius:4px;border:1px solid #cbd5e1;background:#fff;color:#334155}}
+.editor-actions .primary{{border-color:#283593;background:#283593;color:#fff}}
+.edit-hint{{font-size:11px;color:#64748b;margin-top:8px;line-height:1.4}}
 </style>
 </head>
 <body>
@@ -2773,6 +2832,8 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <button class="tb-btn" onclick="exportPng()">&#128247; 导出图片</button>
   <div class="sep"></div>
   <button id="bizToggleBtn" class="tb-btn" onclick="toggleBusinessView()" style="background:rgba(26,188,156,.35)">&#127968; 业务分组:开</button>
+  <button id="lockContainersBtn" class="tb-btn" onclick="toggleContainerLock()" title="锁定或解锁所有业务/层/服务框">&#128274; 锁定容器:关</button>
+  <button class="tb-btn" onclick="downloadEditedCsv()" title="下载当前编辑后的资源表">&#128190; 导出编辑表</button>
   <div class="sep"></div>
   <select id="layoutSelect" onchange="changeLayout(this.value)">
     {layout_options}
@@ -2788,6 +2849,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 </div>
 
 <div id="cy"></div>
+<button id="clear-highlight-float" onclick="clearHighlight()">&#10005; 取消高亮</button>
 <div id="sidebar">
     <div id="sb-header">
       <span>节点 / 边 详情</span>
@@ -2822,6 +2884,19 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   </div>
   <div id="drawer-body"></div>
 </div>
+<div id="editor-modal" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+  <div id="editor-card">
+    <h2 id="editor-title">编辑节点</h2>
+    <form id="node-editor-form" onsubmit="saveNodeEdit(event)">
+      <div id="editor-fields" class="edit-grid"></div>
+      <p class="edit-hint">保存后会立即更新节点标签、详情和当前拓扑；“导出编辑表”可下载包含修改字段的 CSV，作为下一次 Excel 导入的中间表。</p>
+      <div class="editor-actions">
+        <button type="button" onclick="closeNodeEditor()">取消</button>
+        <button type="submit" class="primary">保存并重新渲染</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <script>{cytoscape_js}</script>
 <script>
@@ -2851,6 +2926,8 @@ setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
 // ── 事件：点击节点 ─────────────────────────────────────────────────────────
 cy.on('tap', 'node', function(evt) {{
   var d  = evt.target.data();
+  window._activeNodeId = evt.target.id();
+  showFloatingClear(evt.target);
   var bg = d.bg_color || '#888';
   if (d.type === '__region__' || d.type === '__group__' || d.type === '__business__' || d.type === '__layer__' || d.type === '__service__') {{
     showContainerDetail(d);
@@ -2961,6 +3038,7 @@ cy.on('tap', function(evt) {{
 }});
 
 function showNodeDetail(d, bg) {{
+  window._activeNodeId = d.id;
   var rows = [
     ['资源名称', d.name],
     ['所属业务', d.business  || '-'],
@@ -2980,7 +3058,12 @@ function showNodeDetail(d, bg) {{
   if (d.source_business && d.source_business !== d.business) {{
     rows.push(['原始所属业务', d.source_business]);
   }}
-  var html = rows.map(function(r) {{
+  var html = '<div style="display:flex;gap:6px;margin-bottom:10px">' +
+             '<button class="tb-btn" style="background:#E74C3C;color:#fff;border:0" ' +
+             'onclick="clearHighlight()">&#10005; 取消高亮</button>' +
+             '<button class="tb-btn" style="background:#283593;color:#fff;border:0" ' +
+             'onclick="openNodeEditor()">&#9998; 编辑节点</button></div>';
+  html += rows.map(function(r) {{
     return '<div class="d-row"><div class="d-label">'+r[0]+'</div>' +
            '<div class="d-value">'+escHtml(r[1])+'</div></div>';
   }}).join('');
@@ -3148,6 +3231,23 @@ function showContainerDetail(d) {{
     '<span class="tag" style="background:'+tagColor+'">'+label+'</span>';
 }}
 
+function clearHighlight() {{
+  cy.elements().removeClass('faded highlighted');
+  window._activeNodeId = null;
+  document.getElementById('clear-highlight-float').style.display = 'none';
+  document.getElementById('detail-panel').innerHTML =
+    '<p style="color:#bbb;font-size:12px;margin-top:30px;text-align:center;">点击节点或连线查看详情</p>';
+  document.getElementById('node-type-tag').innerHTML = '';
+}}
+
+function showFloatingClear(node) {{
+  var button = document.getElementById('clear-highlight-float');
+  var pos = node.renderedPosition();
+  button.style.left = Math.max(8, Math.min(window.innerWidth - 140, pos.x + 14)) + 'px';
+  button.style.top = Math.max(56, pos.y + 42) + 'px';
+  button.style.display = 'block';
+}}
+
 // ── 工具函数 ──────────────────────────────────────────────────────────────
 function escHtml(s) {{
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -3209,6 +3309,109 @@ function searchNodes(q) {{
   }} else {{
     showToast('未找到匹配节点');
   }}
+}}
+
+var EDITABLE_FIELDS = [
+  ['name', '资源名称', 'input'],
+  ['type', '资源类型', 'input'],
+  ['business', '所属业务', 'input'],
+  ['group_label', '资源分组', 'input'],
+  ['resource_id', '资源ID', 'input'],
+  ['enterprise_project', '企业项目', 'input'],
+  ['region', '区域', 'input'],
+  ['spec', '规格', 'input'],
+  ['targets', '下游服务（逗号分隔）', 'textarea'],
+  ['desc', '描述', 'textarea']
+];
+
+function openNodeEditor() {{
+  var id = window._activeNodeId;
+  var node = id ? cy.getElementById(id) : cy.$(':selected').first();
+  if (!node || node.empty() || node.data('is_container')) {{
+    showToast('请先选择一个资源节点');
+    return;
+  }}
+  window._editingNodeId = node.id();
+  var d = node.data();
+  var fields = document.getElementById('editor-fields');
+  fields.innerHTML = EDITABLE_FIELDS.map(function(field) {{
+    var key = field[0], label = field[1], kind = field[2];
+    var value = d[key] || '';
+    var control = kind === 'textarea'
+      ? '<textarea id="edit-' + key + '">' + escHtml(value) + '</textarea>'
+      : '<input id="edit-' + key + '" value="' + escAttr(value) + '" />';
+    return '<div class="edit-field ' + (kind === 'textarea' ? 'full' : '') + '">' +
+      '<label for="edit-' + key + '">' + label + '</label>' + control + '</div>';
+  }}).join('');
+  document.getElementById('editor-title').textContent = '编辑节点：' + (d.name || '未命名');
+  document.getElementById('editor-modal').classList.add('open');
+}}
+
+function closeNodeEditor() {{
+  document.getElementById('editor-modal').classList.remove('open');
+  window._editingNodeId = null;
+}}
+
+function saveNodeEdit(event) {{
+  event.preventDefault();
+  var node = window._editingNodeId ? cy.getElementById(window._editingNodeId) : cy.collection();
+  if (!node || node.empty()) return closeNodeEditor();
+  var updated = {{}};
+  EDITABLE_FIELDS.forEach(function(field) {{
+    var key = field[0], input = document.getElementById('edit-' + key);
+    if (input) updated[key] = input.value.trim();
+  }});
+  node.data(updated);
+  var type = (updated.type || node.data('service_key') || 'default').toUpperCase();
+  node.data('display_label', type + '\\n' + (updated.name || node.data('name') || ''));
+  node.data('service_key', (updated.type || node.data('service_key') || 'default').toLowerCase());
+  node.data('source_business', updated.business || node.data('source_business') || '');
+  try {{ localStorage.setItem('topology-node-' + node.id(), JSON.stringify(node.data())); }} catch (ignore) {{}}
+  closeNodeEditor();
+  showNodeDetail(node.data(), node.data('bg_color') || '#888');
+  showToast('节点已更新，拓扑已重新渲染');
+}}
+
+function escAttr(s) {{
+  return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}}
+
+function downloadEditedCsv() {{
+  var columns = ['name','type','business','group_label','resource_id',
+                 'enterprise_project','region','spec','desc','targets'];
+  var labels = ['服务名称','服务类型','所属业务','资源分组','资源ID',
+                '企业项目','区域','规格','描述','下游服务'];
+  var rows = [labels];
+  cy.nodes().filter(function(n) {{ return !n.data('is_container') && !n.data('is_summary') &&
+    n.data('type') !== '__agg_count__' && n.data('type') !== '__agg_compute__';
+  }}).forEach(function(n) {{
+    var d = n.data();
+    rows.push(columns.map(function(key) {{ return d[key] || ''; }}));
+  }});
+  var csv = rows.map(function(row) {{
+    return row.map(function(value) {{
+      return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+    }}).join(',');
+  }}).join('\\r\\n');
+  var blob = new Blob(['\\ufeff' + csv], {{type:'text/csv;charset=utf-8'}});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'topology-edited.csv'; a.click();
+  setTimeout(function() {{ URL.revokeObjectURL(a.href); }}, 1000);
+  showToast('编辑后的资源表已下载');
+}}
+
+var _containersLocked = false;
+function toggleContainerLock() {{
+  _containersLocked = !_containersLocked;
+  var containers = cy.nodes('[is_container = 1]');
+  containers.forEach(function(n) {{
+    if (_containersLocked) n.ungrabify(); else n.grabify();
+  }});
+  var btn = document.getElementById('lockContainersBtn');
+  btn.classList.toggle('locked', _containersLocked);
+  btn.innerHTML = _containersLocked ? '&#128274; 锁定容器:开' : '&#128275; 锁定容器:关';
+  showToast(_containersLocked ? '业务/层/服务框已锁定，可拖动视角和资源节点' : '容器已解锁');
 }}
 
 
