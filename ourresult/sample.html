@@ -857,8 +857,14 @@ function addResourceNode() {
   biz.data('resource_total', (biz.data('resource_total') || 0) + 1);
   if (_containersLocked) {
     cy.nodes('[is_container = 1]').forEach(function(container) {
-      container.ungrabify();
-      container.style('events', 'no');
+      var isBusinessFrame = container.data('type') === '__business__';
+      if (isBusinessFrame) {
+        container.grabify();
+        container.style('events', 'yes');
+      } else {
+        container.ungrabify();
+        container.style('events', 'no');
+      }
     });
   }
   closeNodeEditor();
@@ -902,11 +908,17 @@ function toggleContainerLock() {
   var containers = cy.nodes('[is_container = 1]');
   containers.forEach(function(n) {
     if (_containersLocked) {
-      n.ungrabify();
-      // Let the renderer treat the compound frame as transparent. Pointer
-      // drags then reach the Cytoscape canvas and pan the viewport, including
-      // when the pointer starts on empty space inside a business frame.
-      n.style('events', 'no');
+      var isBusinessFrame = n.data('type') === '__business__';
+      if (isBusinessFrame) {
+        // The business frame is the movable viewport proxy. Its descendants
+        // remain fixed relative to it, while inner architecture frames stay
+        // locked and cannot be grabbed independently.
+        n.grabify();
+        n.style('events', 'yes');
+      } else {
+        n.ungrabify();
+        n.style('events', 'no');
+      }
     } else {
       n.grabify();
       n.style('events', 'yes');
