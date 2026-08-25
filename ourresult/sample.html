@@ -134,7 +134,7 @@ body{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <button id="bizToggleBtn" class="tb-btn" onclick="toggleBusinessView()" style="background:rgba(26,188,156,.35)">&#127968; 业务分组:开</button>
   <button id="lockContainersBtn" class="tb-btn" onclick="toggleContainerLock()" title="锁定或解锁所有业务/层/服务框">&#128274; 锁定容器:关</button>
   <button id="addResourceBtn" class="tb-btn" onclick="openAddNodeEditor()" title="添加资源并生成新节点">&#43; 新增资源</button>
-  <button class="tb-btn" onclick="downloadEditedCsv()" title="下载当前编辑后的资源表">&#128190; 导出编辑表</button>
+  <button class="tb-btn" onclick="downloadEditedCsv()" title="选择目录导出 CSV 和自适应 Excel 编辑表">&#128190; 导出编辑表</button>
   <div class="sep"></div>
   <select id="layoutSelect" onchange="changeLayout(this.value)">
     <option value="bdat">BDAT分组层次布局（推荐）</option>
@@ -248,7 +248,7 @@ body{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
     <h2 id="editor-title">编辑节点</h2>
     <form id="node-editor-form" onsubmit="saveNodeEdit(event)">
       <div id="editor-fields" class="edit-grid"></div>
-      <p class="edit-hint">保存后会立即更新节点标签、详情和当前拓扑；“导出编辑表”可下载包含修改字段的 CSV，作为下一次 Excel 导入的中间表。</p>
+      <p class="edit-hint">保存后会立即更新节点标签、详情和当前拓扑；“导出编辑表”会生成 CSV 和带自适应列宽的 Excel 兼容表。</p>
       <div class="editor-actions">
         <button type="button" onclick="closeNodeEditor()">取消</button>
         <button type="submit" class="primary">保存并重新渲染</button>
@@ -893,7 +893,76 @@ function escAttr(s) {
     .replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-function downloadEditedCsv() {
+function csvEscape(value) {
+  return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+}
+
+function displayWidth(value) {
+  var text = String(value == null ? '' : value);
+  var width = 0;
+  for (var i = 0; i < text.length; i++) {
+    width += text.charCodeAt(i) > 255 ? 2 : 1;
+  }
+  return width;
+}
+
+function xmlEscape(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildAdaptiveExcelXml(rows) {
+  // CSV cannot carry widths; Excel 2003 XML can, so export a companion file
+  // with measured, clamped column widths for spreadsheet users.
+  var widths = rows[0].map(function(_, columnIndex) {
+    var maxWidth = 0;
+    rows.forEach(function(row) {
+      maxWidth = Math.max(maxWidth, displayWidth(row[columnIndex]));
+    });
+    return Math.max(72, Math.min(360, (maxWidth + 2) * 7));
+  });
+  var xml = '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<?mso-application progid="Excel.Sheet"?>' +
+    '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" ' +
+    'xmlns:o="urn:schemas-microsoft-com:office:office" ' +
+    'xmlns:x="urn:schemas-microsoft-com:office:excel" ' +
+    'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">' +
+    '<Styles><Style ss:ID="Header"><Font ss:Bold="1"/><Interior ' +
+    'ss:Color="#E8EEF7" ss:Pattern="Solid"/></Style></Styles>' +
+    '<Worksheet ss:Name="Edited Resources"><Table>';
+  widths.forEach(function(width) {
+    xml += '<Column ss:Width="' + width.toFixed(1) + '"/>';
+  });
+  rows.forEach(function(row, rowIndex) {
+    xml += '<Row>';
+    row.forEach(function(value) {
+      var style = rowIndex === 0 ? ' ss:StyleID="Header"' : '';
+      xml += '<Cell' + style + '><Data ss:Type="String">' +
+             xmlEscape(value) + '</Data></Cell>';
+    });
+    xml += '</Row>';
+  });
+  return xml + '</Table></Worksheet></Workbook>';
+}
+
+function triggerBlobDownload(blob, filename) {
+  var link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  setTimeout(function() { URL.revokeObjectURL(link.href); }, 1000);
+}
+
+async function writeBlobToDirectory(directory, filename, blob) {
+  var handle = await directory.getFileHandle(filename, {create: true});
+  var writable = await handle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+async function downloadEditedCsv() {
   var columns = ['name','type','business','group_label','resource_id',
                  'enterprise_project','region','spec','desc','targets'];
   var labels = ['服务名称','服务类型','所属业务','资源分组','资源ID',
@@ -906,15 +975,35 @@ function downloadEditedCsv() {
     rows.push(columns.map(function(key) { return d[key] || ''; }));
   });
   var csv = rows.map(function(row) {
-    return row.map(function(value) {
-      return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
-    }).join(',');
+    return row.map(csvEscape).join(',');
   }).join('\r\n');
-  var blob = new Blob(['\ufeff' + csv], {type:'text/csv;charset=utf-8'});
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = 'topology-edited.csv'; a.click();
-  setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
-  showToast('编辑后的资源表已下载');
+  var csvBlob = new Blob(['\ufeff' + csv], {type:'text/csv;charset=utf-8'});
+  var excelBlob = new Blob([buildAdaptiveExcelXml(rows)],
+    {type:'application/vnd.ms-excel;charset=utf-8'});
+  var files = [
+    {name:'topology-edited.csv', blob:csvBlob},
+    {name:'topology-edited.xls', blob:excelBlob}
+  ];
+
+  if (window.showDirectoryPicker && window.isSecureContext) {
+    try {
+      var directory = await window.showDirectoryPicker({mode:'readwrite'});
+      for (var i = 0; i < files.length; i++) {
+        await writeBlobToDirectory(directory, files[i].name, files[i].blob);
+      }
+      showToast('CSV 和自适应 Excel 表已保存到指定目录');
+      return;
+    } catch (error) {
+      if (error && error.name === 'AbortError') {
+        showToast('已取消选择导出目录');
+        return;
+      }
+      console.warn('目录写入失败，改用浏览器下载:', error);
+    }
+  }
+
+  files.forEach(function(file) { triggerBlobDownload(file.blob, file.name); });
+  showToast('CSV 和自适应 Excel 表已下载');
 }
 
 var _containersLocked = false;
