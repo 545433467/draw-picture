@@ -354,7 +354,12 @@ def get_service_key(name, type_field, resource_id="", group=""):
     if group_hint:
         return group_hint
     type_text = str(type_field or "").lower().strip()
-    if type_text and type_text != "default":
+    # “Other” is the UI label for the fallback service type. Treat an
+    # explicit value the same as an empty/default type so a recognizable
+    # resource name can still be classified, otherwise it will be filtered.
+    if type_text in {"default", "other"}:
+        type_text = ""
+    if type_text:
         # ECS/BMS-hosted middleware should be grouped as middleware, not app compute.
         if type_text in {"ecs", "bms"}:
             name_lower = (name or "").lower()
@@ -391,6 +396,16 @@ def get_service_key(name, type_field, resource_id="", group=""):
 
 def get_service_display_name(service_key):
     return SERVICE_DISPLAY_NAMES.get(service_key, service_key.upper())
+
+
+def is_other_service_record(record):
+    """Return whether a resource would be placed in the fallback Other group."""
+    return get_service_key(
+        record.get("name", ""),
+        record.get("type", "default"),
+        record.get("resource_id", ""),
+        record.get("group", ""),
+    ) == "default"
 
 
 def compact_resource_name(name, max_units=26):
@@ -816,6 +831,20 @@ def build_graph(records):
                     not in (r.get("business") or "").strip().casefold())
         ]
 
+    # The fallback service type is displayed as "Other". Remove those
+    # records before planning containers so neither resources nor references
+    # to them can create an Other business/service group.
+    other_names = {
+        _name_key(r["name"])
+        for r in records
+        if is_other_service_record(r)
+    }
+    if other_names:
+        filtered_names.update(other_names)
+        records = [
+            r for r in records if _name_key(r["name"]) not in other_names
+        ]
+
     nodes = []
     edges = []
     edge_lookup = {}
@@ -1196,13 +1225,14 @@ def build_graph(records):
 
     def register_external_target(source_entry, target_name):
         key = name_key(target_name)
+        inferred_key = infer_external_service_key(source_entry, target_name)
+        if inferred_key == "default":
+            return
         spec = external_specs.setdefault(key, {
             "name": target_name,
             "service_key": "default",
         })
-        inferred_key = infer_external_service_key(source_entry, target_name)
-        if inferred_key != "default":
-            spec["service_key"] = inferred_key
+        spec["service_key"] = inferred_key
 
     for source_entry in real_entries:
         for target_name in split_target_names(source_entry["record"]["targets"]):
@@ -3407,6 +3437,12 @@ function saveNodeEdit(event) {{
     var key = field[0], input = document.getElementById('edit-' + key);
     if (input) updated[key] = input.value.trim();
   }});
+  var editedService = (updated.type || node.data('service_key') || 'default')
+    .toLowerCase().split(/[-_./:\\s]+/)[0];
+  if (editedService === 'default' || editedService === 'other') {{
+    showToast('服务类型不能为空或 Other');
+    return;
+  }}
   node.data(updated);
   var type = (updated.type || node.data('service_key') || 'default').toUpperCase();
   node.data('display_label', type + '\\n' + (updated.name || node.data('name') || ''));
@@ -3427,6 +3463,10 @@ var SERVICE_COLORS = {{
 }};
 var SERVICE_LABELS = {{ecs:'ECS', cce:'CCE', cci:'CCI', vpc:'VPC', nat:'NAT', cc:'CC',
   dcaas:'DCAAS', cnad:'CNAD', waf:'WAF', elb:'ELB'}};
+
+function isOtherService(service) {{
+  return service === 'default' || service === 'other';
+}}
 
 function getLayerForService(service) {{
   if (['cnad','cdn','waf','eip','dns'].indexOf(service) >= 0) return 'access';
@@ -3470,6 +3510,10 @@ function addResourceNode() {{
   }});
   if (!values.name) {{ showToast('资源名称不能为空'); return; }}
   var service = (values.type || 'default').toLowerCase().split(/[-_./:\\s]+/)[0];
+  if (isOtherService(service)) {{
+    showToast('服务类型不能为空或 Other');
+    return;
+  }}
   var layer = getLayerForService(service);
   var business = (values.business || '').trim();
   var businessKey = business

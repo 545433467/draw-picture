@@ -756,6 +756,12 @@ function saveNodeEdit(event) {
     var key = field[0], input = document.getElementById('edit-' + key);
     if (input) updated[key] = input.value.trim();
   });
+  var editedService = (updated.type || node.data('service_key') || 'default')
+    .toLowerCase().split(/[-_./:\s]+/)[0];
+  if (editedService === 'default' || editedService === 'other') {
+    showToast('服务类型不能为空或 Other');
+    return;
+  }
   node.data(updated);
   var type = (updated.type || node.data('service_key') || 'default').toUpperCase();
   node.data('display_label', type + '\n' + (updated.name || node.data('name') || ''));
@@ -776,6 +782,10 @@ var SERVICE_COLORS = {
 };
 var SERVICE_LABELS = {ecs:'ECS', cce:'CCE', cci:'CCI', vpc:'VPC', nat:'NAT', cc:'CC',
   dcaas:'DCAAS', cnad:'CNAD', waf:'WAF', elb:'ELB'};
+
+function isOtherService(service) {
+  return service === 'default' || service === 'other';
+}
 
 function getLayerForService(service) {
   if (['cnad','cdn','waf','eip','dns'].indexOf(service) >= 0) return 'access';
@@ -819,6 +829,10 @@ function addResourceNode() {
   });
   if (!values.name) { showToast('资源名称不能为空'); return; }
   var service = (values.type || 'default').toLowerCase().split(/[-_./:\s]+/)[0];
+  if (isOtherService(service)) {
+    showToast('服务类型不能为空或 Other');
+    return;
+  }
   var layer = getLayerForService(service);
   var business = (values.business || '').trim();
   var businessKey = business
