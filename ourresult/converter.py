@@ -1213,21 +1213,7 @@ def build_graph(records):
                 continue
             register_external_target(source_entry, target_name)
 
-        for target_name in split_target_names(
-                source_entry["record"]["inferred_targets"]):
-            if _name_key(target_name) in filtered_names:
-                continue
-            if resolve_inferred_target_entry(
-                    source_entry, target_name, real_entries, real_name_map):
-                continue
-            reference = parse_inferred_reference(target_name)
-            if _name_key(reference["target_name"]) in filtered_names:
-                continue
-            # 服务类型-业务名是对现有服务组的引用，找不到时不创建伪资源。
-            if reference["kind"] in {"business_service", "service_marker"}:
-                continue
-            register_external_target(source_entry, reference["target_name"])
-
+        # 推断下游不参与外部节点注册；服务类型-业务名仅作为现有服务组引用。
     for spec in external_specs.values():
         inferred_business = infer_external_business(
             spec["name"], spec["service_key"]
@@ -1836,10 +1822,9 @@ def build_graph(records):
     for source_entry in real_entries:
         r = source_entry["record"]
 
-        def connect_target(target_entry, target_name, inferred=False):
+        def connect_target(target_entry, target_name):
             connect_entries(
                 source_entry, target_entry, r["name"], target_name,
-                inferred,
             )
 
         # 确认下游
@@ -1851,39 +1836,6 @@ def build_graph(records):
                 if not target_entry:
                     continue
                 connect_target(target_entry, t)
-
-        # 推断下游使用紫色虚线，并支持服务类型-业务名与 Service:资源名。
-        if r["inferred_targets"]:
-            for t in split_target_names(r["inferred_targets"]):
-                reference = parse_inferred_reference(t)
-                target_entry = resolve_inferred_target_entry(
-                    source_entry, t, entries, name_entry_map
-                )
-                if not target_entry:
-                    continue
-                connect_target(
-                    target_entry, reference["target_name"], inferred=True
-                )
-
-        # 推断原因中的明确链路：跳过无法对应资源的描述段，连接可识别节点。
-        for chain in extract_inferred_reason_chains(r["reason"]):
-            path = [(source_entry, r["name"])]
-            for token in chain:
-                chain_entry = resolve_reason_chain_entry(
-                    source_entry, token, entries, name_entry_map
-                )
-                if not chain_entry:
-                    continue
-                if path[-1][0]["index"] == chain_entry["index"]:
-                    continue
-                path.append((chain_entry, token))
-
-            for (chain_source, source_name), (chain_target, target_name) in zip(
-                    path, path[1:]):
-                connect_entries(
-                    chain_source, chain_target, source_name, target_name,
-                    inferred=True,
-                )
 
     # ── 四层架构固定层级关系 ──────────────────────────────────────────────
     # 同一业务内，按固定层级顺序（接入 → 网络负载 → 计算容器 → 中间件数据
