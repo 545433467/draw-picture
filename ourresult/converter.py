@@ -577,7 +577,9 @@ EXTRACTED_RIGHT_GAP = 520
 
 # 业务关键字过滤：只绘制“所属业务”包含该关键字（不区分大小写）的业务及其节点；
 # 设为 None 表示不过滤。
-BUSINESS_FILTER_KEYWORD = "chat"
+# 业务过滤默认关闭；拓扑按 Excel 的“所属业务”原值分别分组。
+# 保留配置项以兼容调用方显式设置过滤关键字的场景。
+BUSINESS_FILTER_KEYWORD = None
 
 # 需要聚合为一个缩略节点的服务类型（按业务聚合）
 AGGREGATE_SERVICE_KEYS = {"cce", "ecs"}
@@ -799,7 +801,7 @@ def build_graph(records):
             r for r in records if _name_key(r["name"]) not in filtered_names
         ]
 
-    # 业务关键字过滤：只保留“所属业务”包含指定关键字（如 chat）的业务。
+    # 可选业务关键字过滤：仅在调用方显式设置 BUSINESS_FILTER_KEYWORD 时生效。
     # 未填写所属业务的记录暂时保留，待回退归并后再按最终业务过滤。
     if BUSINESS_FILTER_KEYWORD:
         keyword = BUSINESS_FILTER_KEYWORD.casefold()
@@ -1250,7 +1252,7 @@ def build_graph(records):
             forced_service_key=spec["service_key"],
         ))
 
-    # 外部节点同样遵循业务关键字过滤：不属于 chat 业务的虚拟业务不绘制。
+    # 外部节点同样遵循调用方显式设置的业务关键字过滤。
     if BUSINESS_FILTER_KEYWORD:
         keyword = BUSINESS_FILTER_KEYWORD.casefold()
         entries = [
@@ -3396,7 +3398,7 @@ function openAddNodeEditor() {{
   _editorMode = 'add';
   window._editingNodeId = null;
   var fields = document.getElementById('editor-fields');
-  var defaults = {{name:'', type:'ecs', business:'chat', group_label:'',
+  var defaults = {{name:'', type:'ecs', business:'', group_label:'',
                    resource_id:'', enterprise_project:'', region:'', spec:'',
                    targets:'', desc:''}};
   fields.innerHTML = EDITABLE_FIELDS.map(function(field) {{
@@ -3517,12 +3519,15 @@ function addResourceNode() {{
   if (!values.name) {{ showToast('资源名称不能为空'); return; }}
   var service = (values.type || 'default').toLowerCase().split(/[-_./:\\s]+/)[0];
   var layer = getLayerForService(service);
-  var business = values.business || 'chat';
-  var businessKey = '__business__:' + business.toLowerCase().replace(/[\\s_-]+/g, '-');
+  var business = (values.business || '').trim();
+  var businessKey = business
+    ? '__business__:' + business.toLowerCase().replace(/[\\s_-]+/g, '-')
+    : '__service_business__:' + service;
+  var businessLabel = business || (SERVICE_LABELS[service] || service.toUpperCase());
   var biz = findNodeByData('business_key', businessKey);
   if (biz.empty()) {{
     var bizId = 'biz_dynamic_' + Date.now();
-    biz = cy.add({{ group:'nodes', data: {{id:bizId, name:business, business_key:businessKey,
+    biz = cy.add({{ group:'nodes', data: {{id:bizId, name:businessLabel, business_key:businessKey,
       type:'__business__', is_container:1, resource_total:0, bg_color:'#E8F8F5',
       border_color:'#1ABC9C', text_color:'#0E6655', shape:'roundrectangle'}} }});
     biz.position({{x: cy.nodes().length * 80, y: 160}});
@@ -3559,7 +3564,7 @@ function addResourceNode() {{
   var parentId = serviceContainer.empty() ? biz.id() : serviceContainer.id();
   var node = cy.add({{group:'nodes', data: {{id:nodeId, name:values.name, display_label:(SERVICE_LABELS[service] || service.toUpperCase()) + '\\n' + values.name,
     type:values.type || 'default', service_key:service, layer_key:layer, layer_name:LAYER_LABELS[layer],
-    business:business, business_key:businessKey, group_label:values.group_label, resource_id:values.resource_id,
+    business:businessLabel, business_key:businessKey, group_label:values.group_label, resource_id:values.resource_id,
     enterprise_project:values.enterprise_project, region:values.region, spec:values.spec, desc:values.desc,
     targets:values.targets, bg_color:colors[0], border_color:colors[1], shape:'roundrectangle',
     is_container:0, is_summary:0, is_grouped_resource:1, parent:parentId}}}});
