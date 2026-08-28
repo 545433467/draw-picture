@@ -1491,13 +1491,12 @@ def build_graph(records):
             group_key
         )
         sc_key = (biz_key, layer_key, svc_key)
-        if not business_meta[biz_key]["is_virtual"]:
-            agg = service_agg.setdefault(sc_key, {
-                "resource_total": 0, "visible_count": 0, "collapsed_count": 0,
-            })
-            agg["resource_total"] += len(info)
-            agg["visible_count"] += len(group_info[group_key]["visible"])
-            agg["collapsed_count"] += len(group_info[group_key]["hidden"])
+        agg = service_agg.setdefault(sc_key, {
+            "resource_total": 0, "visible_count": 0, "collapsed_count": 0,
+        })
+        agg["resource_total"] += len(info)
+        agg["visible_count"] += len(group_info[group_key]["visible"])
+        agg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
     # 按“业务 × 层 × 资源分组”聚合所有资源：每个资源分组生成一个缩略节点。
     agg_meta = {}
@@ -1511,13 +1510,12 @@ def build_graph(records):
                 or "(未设置资源分组)"
             )
             gkey = glabel.casefold()
-            meta = agg_meta.setdefault((biz_key, gkey, layer_key), {
+            meta = agg_meta.setdefault((biz_key, gkey, layer_key, svc_key), {
                 "count": 0, "resources": [], "layer_key": layer_key,
-                "label": glabel, "svc_keys": set(),
+                "label": glabel, "service_key": svc_key,
             })
             meta["count"] += 1
             meta["resources"].append(make_summary_resource(entry))
-            meta["svc_keys"].add(svc_key)
 
     agg_compute_ids = {}
     agg_compute_nodes = []
@@ -1537,39 +1535,54 @@ def build_graph(records):
 
         is_virtual = business_meta[biz_key]["is_virtual"]
         if svc_key != "default":
+            # Each resource_type gets an outer service frame around its
+            # resource-group aggregate nodes (for example an ECS frame).
+            sc_key = (biz_key, layer_key, svc_key)
+            if sc_key not in service_container_ids:
+                sc_id = f"sc_{biz_id}_{safe_id(layer_key)}_{safe_id(svc_key)}"
+                service_container_ids[sc_key] = sc_id
+                agg = service_agg[sc_key]
+                service_containers.append({"group": "nodes", "data": {
+                    "id": sc_id,
+                    "name": get_service_display_name(svc_key),
+                    "min_width": container_min_width(
+                        get_service_display_name(svc_key), font_size=22
+                    ),
+                    "type": "__service__",
+                    "service_key": svc_key,
+                    "layer_key": layer_key,
+                    "layer_name": get_topology_layer_name(layer_key),
+                    "resource_total": agg["resource_total"],
+                    "visible_count": agg["visible_count"],
+                    "collapsed_count": agg["collapsed_count"],
+                    "is_container": 1,
+                    "parent": (biz_id if is_virtual or svc_key in EXTRACTED_FROM_LAYER_TYPES
+                               else layer_map[(biz_key, layer_key)]),
+                    "bg_color": "#F2F3F4",
+                    "border_color": "#7F8C8D",
+                    "shape": "roundrectangle",
+                }})
             for entry in info:
                 glabel = (
                     (entry["data"].get("group_label") or "").strip()
                     or "(未设置资源分组)"
                 )
-                agg_key = (biz_key, glabel.casefold(), layer_key)
+                agg_key = (biz_key, glabel.casefold(), layer_key, svc_key)
                 if agg_key in agg_compute_ids:
                     continue
                 meta = agg_meta[agg_key]
-                primary_svc = (
-                    "cce" if "cce" in meta["svc_keys"]
-                    else next(iter(meta["svc_keys"]))
-                )
                 agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
                 agg_compute_ids[agg_key] = agg_id
-                # A resource group can contain multiple service types. Put its
-                # single aggregate directly in the layer frame instead of an
-                # arbitrary service frame, preserving the group as the visual
-                # ownership boundary.
-                agg_parent = (
-                    biz_id if is_virtual or meta["layer_key"] in EXTRACTED_FROM_LAYER_TYPES
-                    else layer_map[(biz_key, meta["layer_key"])]
-                )
-                service_label = "/".join(
-                    get_service_display_name(s) for s in sorted(meta["svc_keys"])
-                )
+                agg_parent = service_container_ids[
+                    (biz_key, meta["layer_key"], svc_key)
+                ]
                 agg_compute_nodes.append({"group": "nodes", "data": {
                     "id":              agg_id,
                     "name":            f"...+{meta['count']}",
                     "display_label":   f"{meta['label']}\n...+{meta['count']}",
                     "type":            "__agg_compute__",
-                    "service_key":     primary_svc,
-                    "service_name":    service_label,
+                    "service_key":     svc_key,
+                    "service_name":    get_service_display_name(svc_key),
                     "layer_key":       meta["layer_key"],
                     "layer_name":      get_topology_layer_name(meta["layer_key"]),
                     "business":        business_meta[biz_key]["name"],
@@ -1741,7 +1754,8 @@ def build_graph(records):
             )
             return agg_compute_ids.get(
                 (entry["data"]["business_key"], gkey,
-                 entry["data"].get("layer_key", "compute_app")), ""
+                 entry["data"].get("layer_key", "compute_app"),
+                 entry["data"].get("service_key", "default")), ""
             )
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
@@ -1761,7 +1775,8 @@ def build_graph(records):
             )
             return agg_compute_ids.get(
                 (entry["data"]["business_key"], gkey,
-                 entry["data"].get("layer_key", "compute_app")), ""
+                 entry["data"].get("layer_key", "compute_app"),
+                 entry["data"].get("service_key", "default")), ""
             )
         if entry["group_key"]:
             return group_info[entry["group_key"]]["first_id"]
