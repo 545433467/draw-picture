@@ -596,9 +596,6 @@ EXTRACTED_RIGHT_GAP = 520
 # 保留配置项以兼容调用方显式设置过滤关键字的场景。
 BUSINESS_FILTER_KEYWORD = None
 
-# 需要聚合为一个缩略节点的服务类型（按业务聚合）
-AGGREGATE_SERVICE_KEYS = {"cce", "ecs"}
-
 # 业务容器的调色板（背景, 边框, 标题色）——按顺序循环分配给各业务
 BUSINESS_PALETTE = [
     ("#E8F8F5", "#1ABC9C", "#0E6655"),   # 青绿
@@ -1287,9 +1284,8 @@ def build_graph(records):
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
         )
-        # CCE / CCE_Deployment / ECS 聚合为单个缩略节点，不逐个渲染；
-        # 其他服务全部展示。
-        if svc_key in AGGREGATE_SERVICE_KEYS:
+        # 所有受支持资源均由“资源分组”聚合为单个缩略节点，不逐个渲染。
+        if svc_key != "default":
             visible_entries = []
             hidden_entries = []
         else:
@@ -1317,6 +1313,7 @@ def build_graph(records):
         r = entry["record"]
         d = entry["data"]
         return {
+            "node_id": d.get("id", ""),
             "name": d.get("name", ""),
             "type": (r.get("type") or d.get("type") or "").upper(),
             "service_name": get_service_display_name(d.get("service_key", "default")),
@@ -1487,8 +1484,7 @@ def build_graph(records):
                 "shape":           "roundrectangle",
             }})
 
-    # 服务容器按 (业务, 层, 服务) 去重创建；CCE/CCE_Deployment 与其他非 ECS
-    # 资源一样全部展示，不再聚合或缩略。
+    # 保留服务聚合元数据，供兼容的非摘要路径和容器统计使用。
     service_agg = {}
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
@@ -1503,15 +1499,12 @@ def build_graph(records):
             agg["visible_count"] += len(group_info[group_key]["visible"])
             agg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
-    # 按“业务 × 资源分组”聚合 CCE / CCE_Deployment / ECS：
-    # 每个资源分组生成一个缩略节点。
+    # 按“业务 × 层 × 资源分组”聚合所有资源：每个资源分组生成一个缩略节点。
     agg_meta = {}
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
         )
-        if svc_key not in AGGREGATE_SERVICE_KEYS:
-            continue
         for entry in info:
             glabel = (
                 (entry["data"].get("group_label") or "").strip()
@@ -1543,35 +1536,7 @@ def build_graph(records):
             rendered_ids.add(sid)
 
         is_virtual = business_meta[biz_key]["is_virtual"]
-        if svc_key in AGGREGATE_SERVICE_KEYS:
-            # Aggregated ECS/CCE resources still get a visible service frame so
-            # the architecture diagram shows their ownership explicitly.
-            if not is_virtual:
-                sc_key = (biz_key, layer_key, svc_key)
-                if sc_key not in service_container_ids:
-                    sc_id = f"sc_{biz_id}_{safe_id(layer_key)}_{safe_id(svc_key)}"
-                    service_container_ids[sc_key] = sc_id
-                    agg = service_agg[sc_key]
-                    service_containers.append({"group": "nodes", "data": {
-                        "id": sc_id,
-                        "name": get_service_display_name(svc_key),
-                        "min_width": container_min_width(
-                            get_service_display_name(svc_key), font_size=22
-                        ),
-                        "type": "__service__",
-                        "service_key": svc_key,
-                        "layer_key": layer_key,
-                        "layer_name": get_topology_layer_name(layer_key),
-                        "resource_total": agg["resource_total"],
-                        "visible_count": agg["visible_count"],
-                        "collapsed_count": agg["collapsed_count"],
-                        "is_container": 1,
-                        "parent": (biz_id if svc_key in EXTRACTED_FROM_LAYER_TYPES
-                                   else layer_map[(biz_key, layer_key)]),
-                        "bg_color": "#F2F3F4",
-                        "border_color": "#7F8C8D",
-                        "shape": "roundrectangle",
-                    }})
+        if svc_key != "default":
             for entry in info:
                 glabel = (
                     (entry["data"].get("group_label") or "").strip()
@@ -1587,9 +1552,13 @@ def build_graph(records):
                 )
                 agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
                 agg_compute_ids[agg_key] = agg_id
+                # A resource group can contain multiple service types. Put its
+                # single aggregate directly in the layer frame instead of an
+                # arbitrary service frame, preserving the group as the visual
+                # ownership boundary.
                 agg_parent = (
                     biz_id if is_virtual or meta["layer_key"] in EXTRACTED_FROM_LAYER_TYPES
-                    else service_container_ids[(biz_key, meta["layer_key"], primary_svc)]
+                    else layer_map[(biz_key, meta["layer_key"])]
                 )
                 service_label = "/".join(
                     get_service_display_name(s) for s in sorted(meta["svc_keys"])
@@ -1765,7 +1734,7 @@ def build_graph(records):
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
-        if entry["data"]["service_key"] in AGGREGATE_SERVICE_KEYS:
+        if entry["data"]["service_key"] != "default":
             gkey = (
                 (entry["data"].get("group_label") or "").strip().casefold()
                 or "(未设置资源分组)".casefold()
@@ -1785,7 +1754,7 @@ def build_graph(records):
 
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
-        if entry["data"]["service_key"] in AGGREGATE_SERVICE_KEYS:
+        if entry["data"]["service_key"] != "default":
             gkey = (
                 (entry["data"].get("group_label") or "").strip().casefold()
                 or "(未设置资源分组)".casefold()
@@ -2603,7 +2572,7 @@ def _make_cytoscape_style(icon_data_uris=None):
             "style": {"background-image": f'url("{icon_data_uri}")'},
         })
 
-    # CCE/ECS 聚合缩略节点：优先走标准图标机制（保留图标原样），
+    # 聚合缩略节点：优先走标准图标机制（保留图标原样），
     # 无图标时使用此回退样式；数字徽标为独立红色圆圈。
     style.append({
         "selector": "node[type = '__agg_compute__']",
@@ -2723,7 +2692,9 @@ def generate_html(elements, title="云服务拓扑图", output_path="topology.ht
     visible_resources = sum(1 for e in elements if e.get("group") == "nodes"
                             and not e["data"].get("is_container")
                             and not e["data"].get("is_summary")
-                            and e["data"].get("type") != "__agg_count__")
+                            and e["data"].get("type") not in {
+                                "__agg_count__", "__agg_compute__"
+                            })
     agg_compute_nodes = [e for e in elements if e.get("group") == "nodes"
                          and e["data"].get("type") == "__agg_compute__"]
     summary_nodes = sum(1 for e in elements if e.get("group") == "nodes"
@@ -2771,6 +2742,9 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 #searchBox::placeholder{{color:rgba(255,255,255,.55)}}
 #lockContainersBtn.locked{{background:rgba(231,76,60,.45);border-color:#ffb3aa}}
 #lockContainersBtn{{font-size:14px;font-weight:700;padding:6px 12px}}
+#saveLayoutBtn{{font-size:15px;font-weight:800;padding:7px 15px;
+  background:rgba(39,174,96,.52);border-color:rgba(232,255,240,.8)}}
+#saveLayoutBtn.dirty{{background:rgba(230,126,34,.62);border-color:#ffe0b2}}
 #layoutSelect{{padding:4px 8px;border-radius:4px;border:1px solid rgba(255,255,255,.3);
   background:rgba(255,255,255,.15);color:#fff;font-size:12px;cursor:pointer}}
 #layoutSelect option{{background:#283593}}
@@ -2836,6 +2810,9 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   z-index:1}}
 .sum-table tbody tr{{background:transparent}}
 .sum-table tbody tr:hover{{background:#F4F6F7}}
+.summary-edit-btn{{cursor:pointer;padding:4px 9px;border:1px solid #283593;
+  border-radius:4px;background:#fff;color:#283593;font-size:12px;font-weight:700}}
+.summary-edit-btn:hover{{background:#E8EAF6}}
 .sum-pager{{display:flex;gap:10px;align-items:center;padding:12px 2px;
   font-size:13px;color:#555}}
 .sum-pager .pg-btn{{cursor:pointer;padding:4px 14px;border:1px solid #9AA7B8;
@@ -2881,6 +2858,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <div class="sep"></div>
   <button id="bizToggleBtn" class="tb-btn" onclick="toggleBusinessView()" style="background:rgba(26,188,156,.35)">&#127968; 业务分组:开</button>
   <button id="lockContainersBtn" class="tb-btn" onclick="toggleContainerLock()" title="锁定或解锁所有业务/层/服务框">&#128274; 锁定容器:关</button>
+  <button id="saveLayoutBtn" class="tb-btn" onclick="saveTopologyLayout()" title="保存当前拖拽后的节点位置和视角">&#128190; 保存布局</button>
   <button id="addResourceBtn" class="tb-btn" onclick="openAddNodeEditor()" title="添加资源并生成新节点">&#43; 新增资源</button>
   <button class="tb-btn" onclick="downloadEditedCsv()" title="选择目录导出 CSV 和自适应 Excel 编辑表">&#128190; 导出编辑表</button>
   <div class="sep"></div>
@@ -2928,7 +2906,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
 <div id="drawer-backdrop"></div>
 <div id="summary-drawer">
   <div id="drawer-header">
-    <span id="drawer-title">折叠资源明细</span>
+    <span id="drawer-title">聚合资源明细</span>
     <button class="tb-btn" onclick="closeSummaryDrawer()">&#10005; 关闭</button>
   </div>
   <div id="drawer-body"></div>
@@ -2970,7 +2948,72 @@ var cy = cytoscape({{
   maxZoom: 6,
 }});
 
-setTimeout(function() {{ cy.resize(); cy.fit(undefined, 50); }}, 50);
+// Layout snapshots are intentionally saved only on the explicit toolbar
+// action, so exploratory dragging never changes the generated default view.
+var LAYOUT_STORAGE_KEY = 'topology-layout-v1:' + window.location.pathname + ':' + document.title;
+var _layoutDirty = false;
+var _restoringLayout = false;
+
+function updateLayoutSaveButton() {{
+  var button = document.getElementById('saveLayoutBtn');
+  button.classList.toggle('dirty', _layoutDirty);
+  button.innerHTML = _layoutDirty ? '&#128190; 保存布局*' : '&#128190; 保存布局';
+}}
+
+function markLayoutDirty() {{
+  if (_restoringLayout) return;
+  _layoutDirty = true;
+  updateLayoutSaveButton();
+}}
+
+function restoreTopologyLayout() {{
+  var snapshot;
+  try {{ snapshot = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY) || 'null'); }}
+  catch (ignore) {{ return false; }}
+  if (!snapshot || !snapshot.positions) return false;
+  _restoringLayout = true;
+  cy.batch(function() {{
+    cy.nodes().forEach(function(node) {{
+      var position = snapshot.positions[node.id()];
+      if (position && isFinite(position.x) && isFinite(position.y)) {{
+        node.position({{x:+position.x, y:+position.y}});
+      }}
+    }});
+  }});
+  if (snapshot.zoom && snapshot.pan) {{
+    cy.viewport({{zoom:+snapshot.zoom, pan:snapshot.pan}});
+  }}
+  _restoringLayout = false;
+  return true;
+}}
+
+function saveTopologyLayout() {{
+  var positions = {{}};
+  cy.nodes().forEach(function(node) {{
+    var position = node.position();
+    positions[node.id()] = {{x:position.x, y:position.y}};
+  }});
+  try {{
+    localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({{
+      positions:positions, zoom:cy.zoom(), pan:cy.pan(), savedAt:Date.now()
+    }}));
+    _layoutDirty = false;
+    updateLayoutSaveButton();
+    showToast('当前节点位置和视角已保存，刷新页面后会自动恢复');
+  }} catch (error) {{
+    console.warn('布局保存失败:', error);
+    showToast('布局保存失败：浏览器本地存储不可用');
+  }}
+}}
+
+cy.on('dragfree', 'node', markLayoutDirty);
+cy.on('layoutstop', markLayoutDirty);
+
+setTimeout(function() {{
+  cy.resize();
+  if (!restoreTopologyLayout()) cy.fit(undefined, 50);
+  updateLayoutSaveButton();
+}}, 50);
 
 // ── 事件：点击节点 ─────────────────────────────────────────────────────────
 cy.on('tap', 'node', function(evt) {{
@@ -3109,9 +3152,7 @@ function showNodeDetail(d, bg) {{
   }}
   var html = '<div style="display:flex;gap:6px;margin-bottom:10px">' +
              '<button class="tb-btn" style="background:#E74C3C;color:#fff;border:0" ' +
-             'onclick="clearHighlight()">&#10005; 取消高亮</button>' +
-             '<button class="tb-btn" style="background:#283593;color:#fff;border:0" ' +
-             'onclick="openNodeEditor()">&#9998; 编辑节点</button></div>';
+             'onclick="clearHighlight()">&#10005; 取消高亮</button></div>';
   html += rows.map(function(r) {{
     return '<div class="d-row"><div class="d-label">'+r[0]+'</div>' +
            '<div class="d-value">'+escHtml(r[1])+'</div></div>';
@@ -3155,6 +3196,7 @@ var SUMMARY_COLUMNS = [
   ['business', '所属业务'],
   ['group', '资源分组'],
   ['downstream', '下游服务'],
+  ['actions', '操作'],
 ];
 
 function summaryRow(item) {{
@@ -3216,9 +3258,15 @@ function renderSummaryTable() {{
   html += '</tr></thead><tbody>';
   pageItems.forEach(function(item) {{
     var row = summaryRow(item);
+    var resourceIndex = start + pageItems.indexOf(item);
     html += '<tr>';
     SUMMARY_COLUMNS.forEach(function(col) {{
-      html += '<td>' + escHtml(row[col[0]]) + '</td>';
+      if (col[0] === 'actions') {{
+        html += '<td><button class="summary-edit-btn" onclick="openSummaryResourceEditor(' +
+                resourceIndex + ')">&#9998; 编辑</button></td>';
+      }} else {{
+        html += '<td>' + escHtml(row[col[0]]) + '</td>';
+      }}
     }});
     html += '</tr>';
   }});
@@ -3421,13 +3469,82 @@ function openNodeEditor() {{
 function closeNodeEditor() {{
   document.getElementById('editor-modal').classList.remove('open');
   window._editingNodeId = null;
+  window._editingSummaryResource = null;
   _editorMode = 'edit';
+}}
+
+function openSummaryResourceEditor(resourceIndex) {{
+  var drawer = document.getElementById('summary-drawer');
+  var item = (drawer._resources || [])[resourceIndex];
+  if (!item) return;
+  _editorMode = 'summary';
+  window._editingSummaryResource = {{drawer:drawer, index:resourceIndex}};
+  var values = {{
+    name:item.name || '', type:item.type || item.service_key || '',
+    business:item.business || '', group_label:item.group || '',
+    resource_id:item.resource_id || '', enterprise_project:item.enterprise_project || item.project || '',
+    region:item.region || '', spec:item.spec || '',
+    targets:item.downstream_text || (item.downstream || []).join(', '), desc:item.desc || ''
+  }};
+  document.getElementById('editor-fields').innerHTML = EDITABLE_FIELDS.map(function(field) {{
+    var key = field[0], kind = field[2], value = values[key] || '';
+    var control = kind === 'textarea'
+      ? '<textarea id="edit-' + key + '">' + escHtml(value) + '</textarea>'
+      : '<input id="edit-' + key + '" value="' + escAttr(value) + '" />';
+    return '<div class="edit-field ' + (kind === 'textarea' ? 'full' : '') + '">' +
+      '<label for="edit-' + key + '">' + field[1] + '</label>' + control + '</div>';
+  }}).join('');
+  document.getElementById('editor-title').textContent = '编辑聚合明细：' + (values.name || '未命名');
+  document.getElementById('editor-modal').classList.add('open');
+}}
+
+function saveSummaryResourceEdit() {{
+  var target = window._editingSummaryResource;
+  var drawer = target && target.drawer;
+  var item = target && (drawer._resources || [])[target.index];
+  if (!item) return closeNodeEditor();
+  var updated = {{}};
+  EDITABLE_FIELDS.forEach(function(field) {{
+    var input = document.getElementById('edit-' + field[0]);
+    if (input) updated[field[0]] = input.value.trim();
+  }});
+  if (!updated.name) {{ showToast('资源名称不能为空'); return; }}
+  var service = (updated.type || '').toLowerCase().split(/[-_./:\\s]+/)[0];
+  if (!service || service === 'default' || service === 'other') {{
+    showToast('服务类型不能为空或 Other');
+    return;
+  }}
+  item.name = updated.name;
+  item.type = updated.type.toUpperCase();
+  item.service_key = service;
+  item.business = updated.business;
+  item.group = updated.group_label;
+  item.resource_id = updated.resource_id;
+  item.enterprise_project = updated.enterprise_project;
+  item.region = updated.region;
+  item.spec = updated.spec;
+  item.desc = updated.desc;
+  item.downstream_text = updated.targets;
+  item.downstream = String(updated.targets || '').split(/[,，;；\\r\\n]+/)
+    .map(function(value) {{ return value.trim(); }}).filter(Boolean);
+  var summary = drawer._summary;
+  if (summary) {{
+    summary.summary_resources = drawer._resources;
+    summary.resource_total = drawer._resources.length;
+  }}
+  closeNodeEditor();
+  renderSummaryTable();
+  showToast('聚合明细已更新，可通过导出编辑表保存修改');
 }}
 
 function saveNodeEdit(event) {{
   event.preventDefault();
   if (_editorMode === 'add') {{
     addResourceNode();
+    return;
+  }}
+  if (_editorMode === 'summary') {{
+    saveSummaryResourceEdit();
     return;
   }}
   var node = window._editingNodeId ? cy.getElementById(window._editingNodeId) : cy.collection();
@@ -3666,10 +3783,23 @@ async function downloadEditedCsv() {{
   var labels = ['服务名称','服务类型','所属业务','资源分组','资源ID',
                 '企业项目','区域','规格','描述','下游服务'];
   var rows = [labels];
-  cy.nodes().filter(function(n) {{ return !n.data('is_container') && !n.data('is_summary') &&
-    n.data('type') !== '__agg_count__' && n.data('type') !== '__agg_compute__';
-  }}).forEach(function(n) {{
+  var resources = [];
+  cy.nodes().forEach(function(n) {{
     var d = n.data();
+    if (Array.isArray(d.summary_resources)) {{
+      d.summary_resources.forEach(function(item) {{
+        resources.push({{name:item.name, type:item.type, business:item.business,
+          group_label:item.group, resource_id:item.resource_id,
+          enterprise_project:item.enterprise_project || item.project,
+          region:item.region, spec:item.spec, desc:item.desc,
+          targets:item.downstream_text || (item.downstream || []).join(', ')}});
+      }});
+    }} else if (!d.is_container && !d.is_summary && d.type !== '__agg_count__' &&
+               d.type !== '__agg_compute__') {{
+      resources.push(d);
+    }}
+  }});
+  resources.forEach(function(d) {{
     rows.push(columns.map(function(key) {{ return d[key] || ''; }}));
   }});
   var csv = rows.map(function(row) {{
