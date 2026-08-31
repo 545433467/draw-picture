@@ -715,6 +715,16 @@ def canonical_business_name(value):
     return re.sub(r"[\s_-]+", "-", text).strip("-").casefold()
 
 
+def resource_name_signature(value):
+    """Normalize a resource name for aggregation by ignoring numeric runs.
+
+    The non-numeric structure remains significant, so ``...-pd-0001`` and
+    ``...-db-0001`` stay separate while different numeric suffixes merge.
+    """
+    text = str(value or "").strip().casefold()
+    return re.sub(r"\d+", "#", text)
+
+
 def normalize(s):
     return re.sub(r"[\s\(\（\)\）_-]", "", str(s)).lower()
 
@@ -1498,7 +1508,8 @@ def build_graph(records):
         agg["visible_count"] += len(group_info[group_key]["visible"])
         agg["collapsed_count"] += len(group_info[group_key]["hidden"])
 
-    # 按“业务 × 层 × 资源分组”聚合所有资源：每个资源分组生成一个缩略节点。
+    # 按业务、层、资源类型、资源分组和资源名非数字结构聚合；
+    # 资源名中的数字串被忽略，其他字符结构必须一致。
     agg_meta = {}
     for group_key, info in service_groups.items():
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
@@ -1510,9 +1521,12 @@ def build_graph(records):
                 or "(未设置资源分组)"
             )
             gkey = glabel.casefold()
-            meta = agg_meta.setdefault((biz_key, gkey, layer_key, svc_key), {
+            signature_key = resource_name_signature(entry["data"].get("name", ""))
+            meta = agg_meta.setdefault((biz_key, gkey, layer_key, svc_key,
+                                        signature_key), {
                 "count": 0, "resources": [], "layer_key": layer_key,
                 "label": glabel, "service_key": svc_key,
+                "name_signature": signature_key,
             })
             meta["count"] += 1
             meta["resources"].append(make_summary_resource(entry))
@@ -1521,6 +1535,7 @@ def build_graph(records):
     agg_compute_nodes = []
     agg_count_nodes = []
     service_container_ids = {}
+    group_container_ids = {}
     group_containers = []
     group_container_counter = [0]
     for group_key, info in service_groups.items():
@@ -1552,6 +1567,8 @@ def build_graph(records):
                     "service_key": svc_key,
                     "layer_key": layer_key,
                     "layer_name": get_topology_layer_name(layer_key),
+                    "business": business_meta[biz_key]["name"],
+                    "business_key": biz_key,
                     "resource_total": agg["resource_total"],
                     "visible_count": agg["visible_count"],
                     "collapsed_count": agg["collapsed_count"],
@@ -1562,19 +1579,51 @@ def build_graph(records):
                     "border_color": "#7F8C8D",
                     "shape": "roundrectangle",
                 }})
+            for group_meta_key, group_meta in sorted(agg_meta.items()):
+                if (group_meta_key[0], group_meta_key[2], group_meta_key[3]) != sc_key:
+                    continue
+                group_label_key = group_meta_key[1]
+                container_key = (biz_key, layer_key, svc_key, group_label_key)
+                if container_key in group_container_ids:
+                    continue
+                gid = f"grp_{group_container_counter[0]}"
+                group_container_counter[0] += 1
+                group_container_ids[container_key] = gid
+                group_containers.append({"group": "nodes", "data": {
+                    "id": gid,
+                    "name": group_meta["label"],
+                    "min_width": container_min_width(group_meta["label"], font_size=22),
+                    "type": "__group__",
+                    "service_key": svc_key,
+                    "layer_key": layer_key,
+                    "layer_name": get_topology_layer_name(layer_key),
+                    "business": business_meta[biz_key]["name"],
+                    "business_key": biz_key,
+                    "resource_total": sum(
+                        meta["count"] for key, meta in agg_meta.items()
+                        if key[0] == biz_key and key[1] == group_label_key
+                        and key[2] == layer_key and key[3] == svc_key
+                    ),
+                    "is_container": 1,
+                    "parent": service_container_ids[sc_key],
+                    "bg_color": "#FDFEFE",
+                    "border_color": "#AAB7B8",
+                    "shape": "roundrectangle",
+                }})
             for entry in info:
                 glabel = (
                     (entry["data"].get("group_label") or "").strip()
                     or "(未设置资源分组)"
                 )
-                agg_key = (biz_key, glabel.casefold(), layer_key, svc_key)
+                signature_key = resource_name_signature(entry["data"].get("name", ""))
+                agg_key = (biz_key, glabel.casefold(), layer_key, svc_key, signature_key)
                 if agg_key in agg_compute_ids:
                     continue
                 meta = agg_meta[agg_key]
                 agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
                 agg_compute_ids[agg_key] = agg_id
-                agg_parent = service_container_ids[
-                    (biz_key, meta["layer_key"], svc_key)
+                agg_parent = group_container_ids[
+                    (biz_key, meta["layer_key"], svc_key, glabel.casefold())
                 ]
                 agg_compute_nodes.append({"group": "nodes", "data": {
                     "id":              agg_id,
@@ -1755,7 +1804,8 @@ def build_graph(records):
             return agg_compute_ids.get(
                 (entry["data"]["business_key"], gkey,
                  entry["data"].get("layer_key", "compute_app"),
-                 entry["data"].get("service_key", "default")), ""
+                 entry["data"].get("service_key", "default"),
+                 resource_name_signature(entry["data"].get("name", ""))), ""
             )
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
@@ -1776,7 +1826,8 @@ def build_graph(records):
             return agg_compute_ids.get(
                 (entry["data"]["business_key"], gkey,
                  entry["data"].get("layer_key", "compute_app"),
-                 entry["data"].get("service_key", "default")), ""
+                 entry["data"].get("service_key", "default"),
+                 resource_name_signature(entry["data"].get("name", ""))), ""
             )
         if entry["group_key"]:
             return group_info[entry["group_key"]]["first_id"]
