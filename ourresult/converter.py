@@ -312,12 +312,19 @@ def is_cce_deployment_resource(record):
     CCE cluster resource while ensuring grouped deployment rows use only the
     resource-group aggregation path.
     """
-    group_text = _compact_lower(record.get("group", ""))
-    type_text = _compact_lower(record.get("type", ""))
+    group_text = _compact_lower(
+        record.get("group", "")
+        or record.get("resource_group", "")
+        or record.get("group_label", "")
+    )
+    type_texts = {
+        _compact_lower(record.get(field, ""))
+        for field in ("type", "resource_type", "service_type", "service_key")
+    }
     grouped_aliases = {"cce", "ccedeploym", "ccedeploy"}
     return ("ccedeployment" in group_text
-            or type_text == "ccedeployment"
-            or (bool(group_text) and type_text in grouped_aliases))
+            or "ccedeployment" in type_texts
+            or (bool(group_text) and bool(type_texts & grouped_aliases)))
 
 
 def extract_cce_business_prefix(name):
@@ -742,7 +749,17 @@ def aggregation_signature(entry):
     non-numeric structure of ``resource_name``.
     """
     if is_cce_deployment_resource(entry["record"]):
-        return "__cce_resource_group__"
+        record = entry["record"]
+        group = (
+            record.get("group", "")
+            or record.get("resource_group", "")
+            or entry["data"].get("group_label", "")
+        )
+        # CCE deployments are keyed exclusively by resource-group.  Including
+        # the normalized group in the signature makes this invariant explicit
+        # and prevents a resource_name-based fallback for alternate input
+        # schemas.
+        return "__cce_resource_group__:" + (_compact_lower(group) or "__none__")
     return resource_name_signature(entry["data"].get("name", ""))
 
 

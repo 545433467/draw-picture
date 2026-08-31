@@ -1015,6 +1015,16 @@ class BuildGraphAggregationTests(unittest.TestCase):
                          [1, 2])
         self.assertEqual({node["name"] for node in groups}, {"group-a", "group-b"})
 
+    def test_cce_aggregation_signature_ignores_resource_name(self):
+        first = make_record("completely-different-api-0001", service_type="cce",
+                            group="same-group")
+        second = make_record("another-unrelated-worker-9999", service_type="cce",
+                             group="same-group")
+        entry_template = lambda record: {"record": record, "data": {"name": record["name"], "group_label": record["group"]}}
+
+        self.assertEqual(converter.aggregation_signature(entry_template(first)),
+                         converter.aggregation_signature(entry_template(second)))
+
     def test_non_cce_aggregates_skip_resource_group_frames(self):
         records = [
             make_record("ecs-pd-0001", service_type="ecs", group="group-a"),
