@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import unittest
 
@@ -292,6 +293,21 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         self.assertEqual(list(layer_nodes), order)
         self.assertEqual(y_positions, sorted(y_positions))
+
+    def test_generated_html_applies_bdat_positions_on_initial_load(self):
+        elements = build_graph([
+            make_record("waf-edge", service_type="waf"),
+            make_record("ecs-app", service_type="ecs"),
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "topology.html")
+            converter.generate_html(elements, output_path=output)
+            with open(output, encoding="utf-8") as generated:
+                html = generated.read()
+
+        self.assertIn("function applyGeneratedBdatPositions()", html)
+        self.assertIn("applyGeneratedBdatPositions();", html)
+        self.assertRegex(html, re.compile(r'"bdat_x"\s*:\s*[-\d.]+' ))
 
     def test_resource_group_subcontainers_separate_mixed_groups(self):
         records = [
@@ -926,7 +942,7 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(cce_leaves, [])
         self.assertFalse(any(node.get("is_summary") for node in nodes))
 
-    def test_cce_called_resources_stay_visible_and_group_frame_is_retained(self):
+    def test_cce_aggregates_by_resource_group_even_when_called(self):
         records = [
             make_record("cce-called", service_type="cce",
                         group="CCE_Deployment", targets="rds-target"),
@@ -936,7 +952,6 @@ class BuildGraphAggregationTests(unittest.TestCase):
         ]
 
         nodes = element_data(build_graph(records), "nodes")
-        called = next(node for node in nodes if node.get("name") == "cce-called")
         aggregates = [node for node in nodes
                       if node.get("type") == "__agg_compute__"
                       and node.get("service_key") == "cce"]
@@ -948,13 +963,32 @@ class BuildGraphAggregationTests(unittest.TestCase):
                        and node.get("service_key") == "cce")
 
         self.assertEqual(len(aggregates), 1)
-        self.assertEqual(aggregates[0]["resource_total"], 1)
-        self.assertEqual(called["parent"], group["id"])
+        self.assertEqual(aggregates[0]["resource_total"], 2)
+        self.assertEqual(aggregates[0]["parent"], group["id"])
         self.assertEqual(group["parent"], service["id"])
         edges = call_edges(build_graph(records))
-        self.assertTrue(any(edge["source"] == called["id"]
+        self.assertTrue(any(edge["source"] == aggregates[0]["id"]
                             and edge["target_name"] == "rds-target"
                             for edge in edges))
+
+    def test_cce_resource_groups_create_separate_aggregates_and_frames(self):
+        records = [
+            make_record("cce-a-1", service_type="CCE_Deployment", group="group-a"),
+            make_record("cce-a-2", service_type="CCE_Deployment", group="group-a"),
+            make_record("cce-b-1", service_type="CCE_Deployment", group="group-b"),
+        ]
+
+        nodes = element_data(build_graph(records), "nodes")
+        aggregates = [node for node in nodes
+                      if node.get("type") == "__agg_compute__"
+                      and node.get("service_key") == "cce"]
+        groups = [node for node in nodes
+                  if node.get("type") == "__group__"
+                  and node.get("service_key") == "cce"]
+
+        self.assertEqual(sorted(node["resource_total"] for node in aggregates),
+                         [1, 2])
+        self.assertEqual({node["name"] for node in groups}, {"group-a", "group-b"})
 
     def test_non_cce_aggregates_skip_resource_group_frames(self):
         records = [

@@ -1300,20 +1300,6 @@ def build_graph(records):
     for entry in entries:
         service_groups[entry["group_key"]].append(entry)
 
-    # CCE_Deployment resources with confirmed incoming or outgoing calls stay
-    # as individual nodes; unconnected deployments are collapsed together.
-    referenced_names = {
-        name_key(target_name)
-        for entry in entries
-        for target_name in split_target_names(entry["record"].get("targets", ""))
-    }
-
-    def entry_has_confirmed_call(entry):
-        record = entry["record"]
-        return bool(split_target_names(record.get("targets", ""))) or (
-            name_key(entry["data"].get("name", "")) in referenced_names
-        )
-
     visible_indexes = set()
     group_info = {}
     for group_index, (group_key, group_entries) in enumerate(service_groups.items()):
@@ -1326,14 +1312,8 @@ def build_graph(records):
             for entry in group_entries
         )
         if is_cce_group:
-            visible_entries = [
-                entry for entry in group_entries
-                if entry_has_confirmed_call(entry)
-            ]
-            hidden_entries = [
-                entry for entry in group_entries
-                if not entry_has_confirmed_call(entry)
-            ]
+            visible_entries = []
+            hidden_entries = list(group_entries)
         elif svc_key != "default":
             visible_entries = []
             hidden_entries = []
@@ -1558,9 +1538,6 @@ def build_graph(records):
             group_key
         )
         for entry in info:
-            if (is_cce_deployment_resource(entry["record"])
-                    and entry_has_confirmed_call(entry)):
-                continue
             glabel = (
                 (entry["data"].get("group_label") or "").strip()
                 or "(未设置资源分组)"
@@ -1665,24 +1642,6 @@ def build_graph(records):
                     "shape": "roundrectangle",
                 }})
             for entry in info:
-                if (is_cce_deployment_resource(entry["record"])
-                        and entry_has_confirmed_call(entry)):
-                    group_key_for_node = (
-                        (entry["data"].get("group_label") or "").strip()
-                        or "(未设置资源分组)"
-                    ).casefold()
-                    cce_group_id = group_container_ids.get(
-                        (biz_key, layer_key, svc_key, group_key_for_node)
-                    )
-                    node = node_by_id.get(entry["data"]["id"])
-                    if node and cce_group_id:
-                        node["data"]["parent"] = cce_group_id
-                        node["data"]["group_container"] = cce_group_id
-                        node["data"]["service_container"] = service_container_ids[sc_key]
-                        node["data"]["layer_container"] = layer_map.get(
-                            (biz_key, layer_key), ""
-                        )
-                    continue
                 glabel = (
                     (entry["data"].get("group_label") or "").strip()
                     or "(未设置资源分组)"
@@ -1877,9 +1836,6 @@ def build_graph(records):
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
-        if (is_cce_deployment_resource(entry["record"])
-                and entry_has_confirmed_call(entry)):
-            return entry["data"]["id"]
         if entry["data"]["service_key"] != "default":
             gkey = (
                 (entry["data"].get("group_label") or "").strip().casefold()
@@ -1902,9 +1858,6 @@ def build_graph(records):
 
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
-        if (is_cce_deployment_resource(entry["record"])
-                and entry_has_confirmed_call(entry)):
-            return entry["data"]["id"]
         if entry["data"]["service_key"] != "default":
             gkey = (
                 (entry["data"].get("group_label") or "").strip().casefold()
@@ -3163,12 +3116,26 @@ function saveTopologyLayout() {{
   }}
 }}
 
+function applyGeneratedBdatPositions() {{
+  _restoringLayout = true;
+  cy.batch(function() {{
+    cy.nodes().forEach(function(node) {{
+      var bx = node.data('bdat_x'), by = node.data('bdat_y');
+      if (bx != null && by != null) node.position({{x:+bx, y:+by}});
+    }});
+  }});
+  _restoringLayout = false;
+}}
+
 cy.on('dragfree', 'node', markLayoutDirty);
 cy.on('layoutstop', markLayoutDirty);
 
 setTimeout(function() {{
   cy.resize();
-  if (!restoreTopologyLayout()) cy.fit(undefined, 50);
+  if (!restoreTopologyLayout()) {{
+    applyGeneratedBdatPositions();
+    cy.fit(undefined, 50);
+  }}
   updateLayoutSaveButton();
 }}, 50);
 
