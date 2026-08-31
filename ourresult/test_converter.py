@@ -269,6 +269,30 @@ class BuildGraphAggregationTests(unittest.TestCase):
         ] + [layers[layer_edges[-1]["target"]]["layer_key"]]
         self.assertEqual(chained, order)
 
+    def test_four_architecture_layers_keep_top_to_bottom_positions(self):
+        records = [
+            make_record("waf-edge", service_type="waf"),
+            make_record("elb-edge", service_type="elb"),
+            make_record("ecs-app", service_type="ecs"),
+            make_record("rds-data", service_type="rds"),
+            make_record("nat-extracted", service_type="nat"),
+        ]
+
+        elements = build_graph(records)
+        positions = compute_bdat_positions(elements)
+        layer_nodes = {
+            node["layer_key"]: node
+            for node in element_data(elements, "nodes")
+            if node.get("type") == "__layer__"
+        }
+        order = [
+            "access", "network_lb", "compute_app", "data_middleware_storage",
+        ]
+        y_positions = [positions[layer_nodes[key]["id"]]["y"] for key in order]
+
+        self.assertEqual(list(layer_nodes), order)
+        self.assertEqual(y_positions, sorted(y_positions))
+
     def test_resource_group_subcontainers_separate_mixed_groups(self):
         records = [
             make_record("dcs-1", service_type="dcs", group="缓存A"),
@@ -901,6 +925,39 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(aggs[0]["resource_total"], 3)
         self.assertEqual(cce_leaves, [])
         self.assertFalse(any(node.get("is_summary") for node in nodes))
+
+    def test_cce_uses_resource_group_while_other_types_use_name_signature(self):
+        records = [
+            make_record("cce-prod-api-0001", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("cce-prod-worker-0002", service_type="cce",
+                        group="CCE_Deployment", enterprise_id="ep-A"),
+            make_record("wlbp-tidb-chat-pd-0001", service_type="ecs",
+                        group="TiDB"),
+            make_record("wlbp-tidb-chat-pd-0002", service_type="ecs",
+                        group="TiDB"),
+            make_record("wlbp-tidb-chat-db-0001", service_type="ecs",
+                        group="TiDB"),
+        ]
+
+        nodes = element_data(build_graph(records), "nodes")
+        aggregates = [node for node in nodes
+                      if node.get("type") == "__agg_compute__"]
+        cce_aggregate = next(node for node in aggregates
+                             if node["group_label"] == "CCE_Deployment")
+        tidb_aggregates = [node for node in aggregates
+                           if node["group_label"] == "TiDB"]
+        node_by_id = {node["id"]: node for node in nodes}
+
+        self.assertEqual(cce_aggregate["resource_total"], 2)
+        self.assertEqual(sorted(node["resource_total"] for node in tidb_aggregates),
+                         [1, 2])
+        group_frame = node_by_id[cce_aggregate["parent"]]
+        service_frame = node_by_id[group_frame["parent"]]
+        layer_frame = node_by_id[service_frame["parent"]]
+        self.assertEqual(group_frame["type"], "__group__")
+        self.assertEqual(service_frame["type"], "__service__")
+        self.assertEqual(layer_frame["type"], "__layer__")
 
     def test_cce_deployment_without_business_stays_in_virtual_business(self):
         records = [

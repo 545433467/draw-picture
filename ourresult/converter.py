@@ -725,6 +725,18 @@ def resource_name_signature(value):
     return re.sub(r"\d+", "#", text)
 
 
+def aggregation_signature(entry):
+    """Return the resource identity used inside a resource-group aggregate.
+
+    CCE_Deployment retains its established resource-group aggregation so its
+    deployment details remain together. Other resource types are split by the
+    non-numeric structure of ``resource_name``.
+    """
+    if is_cce_deployment_resource(entry["record"]):
+        return "__cce_resource_group__"
+    return resource_name_signature(entry["data"].get("name", ""))
+
+
 def normalize(s):
     return re.sub(r"[\s\(\（\)\）_-]", "", str(s)).lower()
 
@@ -1521,7 +1533,7 @@ def build_graph(records):
                 or "(未设置资源分组)"
             )
             gkey = glabel.casefold()
-            signature_key = resource_name_signature(entry["data"].get("name", ""))
+            signature_key = aggregation_signature(entry)
             meta = agg_meta.setdefault((biz_key, gkey, layer_key, svc_key,
                                         signature_key), {
                 "count": 0, "resources": [], "layer_key": layer_key,
@@ -1615,7 +1627,7 @@ def build_graph(records):
                     (entry["data"].get("group_label") or "").strip()
                     or "(未设置资源分组)"
                 )
-                signature_key = resource_name_signature(entry["data"].get("name", ""))
+                signature_key = aggregation_signature(entry)
                 agg_key = (biz_key, glabel.casefold(), layer_key, svc_key, signature_key)
                 if agg_key in agg_compute_ids:
                     continue
@@ -1642,6 +1654,9 @@ def build_graph(records):
                     "is_container":    0,
                     "is_summary":      0,
                     "parent":          agg_parent,
+                    "group_container": agg_parent,
+                    "service_container": service_container_ids[sc_key],
+                    "layer_container": layer_map.get((biz_key, meta["layer_key"]), ""),
                 }})
                 agg_count_nodes.append({"group": "nodes", "data": {
                     "id":              f"aggcnt_{len(agg_count_nodes)}",
@@ -1650,6 +1665,9 @@ def build_graph(records):
                     "anchor":          agg_id,
                     "resource_total":  meta["count"],
                     "parent":          agg_parent,
+                    "group_container": agg_parent,
+                    "service_container": service_container_ids[sc_key],
+                    "layer_container": layer_map.get((biz_key, meta["layer_key"]), ""),
                     "is_container":    0,
                     "is_summary":      0,
                 }})
@@ -1805,7 +1823,7 @@ def build_graph(records):
                 (entry["data"]["business_key"], gkey,
                  entry["data"].get("layer_key", "compute_app"),
                  entry["data"].get("service_key", "default"),
-                 resource_name_signature(entry["data"].get("name", ""))), ""
+                 aggregation_signature(entry)), ""
             )
         if entry["index"] in visible_indexes:
             return entry["data"]["id"]
@@ -1827,7 +1845,7 @@ def build_graph(records):
                 (entry["data"]["business_key"], gkey,
                  entry["data"].get("layer_key", "compute_app"),
                  entry["data"].get("service_key", "default"),
-                 resource_name_signature(entry["data"].get("name", ""))), ""
+                 aggregation_signature(entry)), ""
             )
         if entry["group_key"]:
             return group_info[entry["group_key"]]["first_id"]
@@ -1987,6 +2005,10 @@ def compute_bdat_positions(elements):
         service_first_index = {}
         for index, nid in enumerate(biz_groups[biz_key]):
             service_key = leaf_nodes[nid].get("service_key", "default")
+            # Extracted network resources are business-owned right-rail
+            # content. They must not reserve or reorder a four-layer block.
+            if service_key in EXTRACTED_FROM_LAYER_TYPES:
+                continue
             layer_key = leaf_nodes[nid].get("layer_key") or get_topology_layer(
                 service_key, leaf_nodes[nid].get("name", ""),
                 leaf_nodes[nid].get("type", "")
@@ -2156,8 +2178,8 @@ def compute_bdat_positions(elements):
             "row_offsets": layer_row_offsets,
         }
         extracted_count = sum(
-            len(nodes) for (layer_key, service_key), nodes in services.items()
-            if service_key in EXTRACTED_FROM_LAYER_TYPES
+            1 for nid in biz_groups[biz_key]
+            if leaf_nodes[nid].get("service_key") in EXTRACTED_FROM_LAYER_TYPES
         )
         if extracted_count:
             # Reserve room for the right-hand extracted-resource rail so
