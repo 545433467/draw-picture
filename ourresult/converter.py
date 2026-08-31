@@ -1300,6 +1300,20 @@ def build_graph(records):
     for entry in entries:
         service_groups[entry["group_key"]].append(entry)
 
+    # CCE_Deployment resources with confirmed incoming or outgoing calls stay
+    # as individual nodes; unconnected deployments are collapsed together.
+    referenced_names = {
+        name_key(target_name)
+        for entry in entries
+        for target_name in split_target_names(entry["record"].get("targets", ""))
+    }
+
+    def entry_has_confirmed_call(entry):
+        record = entry["record"]
+        return bool(split_target_names(record.get("targets", ""))) or (
+            name_key(entry["data"].get("name", "")) in referenced_names
+        )
+
     visible_indexes = set()
     group_info = {}
     for group_index, (group_key, group_entries) in enumerate(service_groups.items()):
@@ -1307,7 +1321,20 @@ def build_graph(records):
             group_key
         )
         # 所有受支持资源均由“资源分组”聚合为单个缩略节点，不逐个渲染。
-        if svc_key != "default":
+        is_cce_group = bool(group_entries) and all(
+            is_cce_deployment_resource(entry["record"])
+            for entry in group_entries
+        )
+        if is_cce_group:
+            visible_entries = [
+                entry for entry in group_entries
+                if entry_has_confirmed_call(entry)
+            ]
+            hidden_entries = [
+                entry for entry in group_entries
+                if not entry_has_confirmed_call(entry)
+            ]
+        elif svc_key != "default":
             visible_entries = []
             hidden_entries = []
         else:
@@ -1362,6 +1389,9 @@ def build_graph(records):
     for group_key, info in group_info.items():
         hidden_entries = info["hidden"]
         if not hidden_entries:
+            continue
+        if all(is_cce_deployment_resource(entry["record"])
+               for entry in info["entries"]):
             continue
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
@@ -1528,6 +1558,9 @@ def build_graph(records):
             group_key
         )
         for entry in info:
+            if (is_cce_deployment_resource(entry["record"])
+                    and entry_has_confirmed_call(entry)):
+                continue
             glabel = (
                 (entry["data"].get("group_label") or "").strip()
                 or "(未设置资源分组)"
@@ -1591,10 +1624,19 @@ def build_graph(records):
                     "border_color": "#7F8C8D",
                     "shape": "roundrectangle",
                 }})
-            for group_meta_key, group_meta in sorted(agg_meta.items()):
-                if (group_meta_key[0], group_meta_key[2], group_meta_key[3]) != sc_key:
-                    continue
-                group_label_key = group_meta_key[1]
+            cce_service = all(
+                is_cce_deployment_resource(entry["record"])
+                for entry in info
+            )
+            cce_group_labels = {}
+            if cce_service:
+                for cce_entry in info:
+                    cce_label = (
+                        (cce_entry["data"].get("group_label") or "").strip()
+                        or "(未设置资源分组)"
+                    )
+                    cce_group_labels.setdefault(cce_label.casefold(), cce_label)
+            for group_label_key, group_label in sorted(cce_group_labels.items()):
                 container_key = (biz_key, layer_key, svc_key, group_label_key)
                 if container_key in group_container_ids:
                     continue
@@ -1603,8 +1645,8 @@ def build_graph(records):
                 group_container_ids[container_key] = gid
                 group_containers.append({"group": "nodes", "data": {
                     "id": gid,
-                    "name": group_meta["label"],
-                    "min_width": container_min_width(group_meta["label"], font_size=22),
+                    "name": group_label,
+                    "min_width": container_min_width(group_label, font_size=22),
                     "type": "__group__",
                     "service_key": svc_key,
                     "layer_key": layer_key,
@@ -1612,9 +1654,9 @@ def build_graph(records):
                     "business": business_meta[biz_key]["name"],
                     "business_key": biz_key,
                     "resource_total": sum(
-                        meta["count"] for key, meta in agg_meta.items()
-                        if key[0] == biz_key and key[1] == group_label_key
-                        and key[2] == layer_key and key[3] == svc_key
+                        1 for cce_entry in info
+                        if ((cce_entry["data"].get("group_label") or "").strip()
+                            or "(未设置资源分组)").casefold() == group_label_key
                     ),
                     "is_container": 1,
                     "parent": service_container_ids[sc_key],
@@ -1623,6 +1665,24 @@ def build_graph(records):
                     "shape": "roundrectangle",
                 }})
             for entry in info:
+                if (is_cce_deployment_resource(entry["record"])
+                        and entry_has_confirmed_call(entry)):
+                    group_key_for_node = (
+                        (entry["data"].get("group_label") or "").strip()
+                        or "(未设置资源分组)"
+                    ).casefold()
+                    cce_group_id = group_container_ids.get(
+                        (biz_key, layer_key, svc_key, group_key_for_node)
+                    )
+                    node = node_by_id.get(entry["data"]["id"])
+                    if node and cce_group_id:
+                        node["data"]["parent"] = cce_group_id
+                        node["data"]["group_container"] = cce_group_id
+                        node["data"]["service_container"] = service_container_ids[sc_key]
+                        node["data"]["layer_container"] = layer_map.get(
+                            (biz_key, layer_key), ""
+                        )
+                    continue
                 glabel = (
                     (entry["data"].get("group_label") or "").strip()
                     or "(未设置资源分组)"
@@ -1634,9 +1694,12 @@ def build_graph(records):
                 meta = agg_meta[agg_key]
                 agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
                 agg_compute_ids[agg_key] = agg_id
-                agg_parent = group_container_ids[
-                    (biz_key, meta["layer_key"], svc_key, glabel.casefold())
-                ]
+                agg_parent = (
+                    group_container_ids[
+                        (biz_key, meta["layer_key"], svc_key, glabel.casefold())
+                    ]
+                    if cce_service else service_container_ids[sc_key]
+                )
                 agg_compute_nodes.append({"group": "nodes", "data": {
                     "id":              agg_id,
                     "name":            f"...+{meta['count']}",
@@ -1814,6 +1877,9 @@ def build_graph(records):
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
+        if (is_cce_deployment_resource(entry["record"])
+                and entry_has_confirmed_call(entry)):
+            return entry["data"]["id"]
         if entry["data"]["service_key"] != "default":
             gkey = (
                 (entry["data"].get("group_label") or "").strip().casefold()
@@ -1836,6 +1902,9 @@ def build_graph(records):
 
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
+        if (is_cce_deployment_resource(entry["record"])
+                and entry_has_confirmed_call(entry)):
+            return entry["data"]["id"]
         if entry["data"]["service_key"] != "default":
             gkey = (
                 (entry["data"].get("group_label") or "").strip().casefold()

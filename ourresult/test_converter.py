@@ -926,6 +926,58 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(cce_leaves, [])
         self.assertFalse(any(node.get("is_summary") for node in nodes))
 
+    def test_cce_called_resources_stay_visible_and_group_frame_is_retained(self):
+        records = [
+            make_record("cce-called", service_type="cce",
+                        group="CCE_Deployment", targets="rds-target"),
+            make_record("cce-idle", service_type="cce",
+                        group="CCE_Deployment"),
+            make_record("rds-target", service_type="rds"),
+        ]
+
+        nodes = element_data(build_graph(records), "nodes")
+        called = next(node for node in nodes if node.get("name") == "cce-called")
+        aggregates = [node for node in nodes
+                      if node.get("type") == "__agg_compute__"
+                      and node.get("service_key") == "cce"]
+        group = next(node for node in nodes
+                     if node.get("type") == "__group__"
+                     and node.get("name") == "CCE_Deployment")
+        service = next(node for node in nodes
+                       if node.get("type") == "__service__"
+                       and node.get("service_key") == "cce")
+
+        self.assertEqual(len(aggregates), 1)
+        self.assertEqual(aggregates[0]["resource_total"], 1)
+        self.assertEqual(called["parent"], group["id"])
+        self.assertEqual(group["parent"], service["id"])
+        edges = call_edges(build_graph(records))
+        self.assertTrue(any(edge["source"] == called["id"]
+                            and edge["target_name"] == "rds-target"
+                            for edge in edges))
+
+    def test_non_cce_aggregates_skip_resource_group_frames(self):
+        records = [
+            make_record("ecs-pd-0001", service_type="ecs", group="group-a"),
+            make_record("ecs-pd-0002", service_type="ecs", group="group-a"),
+            make_record("ecs-db-0001", service_type="ecs", group="group-b"),
+        ]
+
+        nodes = element_data(build_graph(records), "nodes")
+        self.assertFalse(any(node.get("type") == "__group__"
+                             and node.get("service_key") == "ecs"
+                             for node in nodes))
+        service = next(node for node in nodes
+                       if node.get("type") == "__service__"
+                       and node.get("service_key") == "ecs")
+        aggregates = [node for node in nodes
+                      if node.get("type") == "__agg_compute__"
+                      and node.get("service_key") == "ecs"]
+        self.assertEqual(sorted(node["resource_total"] for node in aggregates),
+                         [1, 2])
+        self.assertTrue(all(node["parent"] == service["id"]
+                            for node in aggregates))
+
     def test_cce_uses_resource_group_while_other_types_use_name_signature(self):
         records = [
             make_record("cce-prod-api-0001", service_type="cce",
@@ -958,6 +1010,10 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(group_frame["type"], "__group__")
         self.assertEqual(service_frame["type"], "__service__")
         self.assertEqual(layer_frame["type"], "__layer__")
+        self.assertFalse(any(
+            node.get("type") == "__group__" and node.get("service_key") == "ecs"
+            for node in nodes
+        ))
 
     def test_cce_deployment_without_business_stays_in_virtual_business(self):
         records = [
@@ -975,7 +1031,10 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(business["name"], "CCE")
         self.assertEqual(business["is_virtual_business"], 1)
         self.assertEqual(agg["resource_total"], 2)
-        self.assertEqual(agg["parent"], business["id"])
+        group = next(node for node in nodes
+                     if node.get("type") == "__group__")
+        self.assertEqual(group["parent"], business["id"])
+        self.assertEqual(agg["parent"], group["id"])
 
     def test_cce_deployment_without_business_falls_back_to_project_business(self):
         records = [
