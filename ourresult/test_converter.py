@@ -990,6 +990,28 @@ class BuildGraphAggregationTests(unittest.TestCase):
                          [1, 2])
         self.assertEqual({node["name"] for node in groups}, {"group-a", "group-b"})
 
+    def test_cce_deploym_alias_aggregates_only_by_resource_group(self):
+        records = [
+            make_record("wlbp-chat-api-0001", service_type="cce_deploym",
+                        group="group-a"),
+            make_record("wlbp-chat-worker-0002", service_type="cce_deploym",
+                        group="group-a"),
+            make_record("wlbp-chat-api-0003", service_type="cce_deploym",
+                        group="group-b"),
+        ]
+
+        nodes = element_data(build_graph(records), "nodes")
+        aggregates = [node for node in nodes
+                      if node.get("type") == "__agg_compute__"
+                      and node.get("service_key") == "cce"]
+        groups = [node for node in nodes
+                  if node.get("type") == "__group__"
+                  and node.get("service_key") == "cce"]
+
+        self.assertEqual(sorted(node["resource_total"] for node in aggregates),
+                         [1, 2])
+        self.assertEqual({node["name"] for node in groups}, {"group-a", "group-b"})
+
     def test_non_cce_aggregates_skip_resource_group_frames(self):
         records = [
             make_record("ecs-pd-0001", service_type="ecs", group="group-a"),

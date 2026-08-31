@@ -303,12 +303,21 @@ def _compact_lower(value):
 
 
 def is_cce_deployment_resource(record):
-    """True when the resource-group column marks a CCE_Deployment, or the
-    service-type is exactly CCE_Deployment (not the generic cce_deploym)."""
+    """Return whether *record* represents a CCE deployment workload.
+
+    Excel exports use several spellings for this resource type.  An explicit
+    ``CCE_Deployment`` type is always a deployment; abbreviated ``cce`` /
+    ``cce_deploym`` values are treated as deployments when they carry a
+    resource-group value.  This preserves the distinction from an ungrouped
+    CCE cluster resource while ensuring grouped deployment rows use only the
+    resource-group aggregation path.
+    """
     group_text = _compact_lower(record.get("group", ""))
     type_text = _compact_lower(record.get("type", ""))
+    grouped_aliases = {"cce", "ccedeploym", "ccedeploy"}
     return ("ccedeployment" in group_text
-            or type_text == "ccedeployment")
+            or type_text == "ccedeployment"
+            or (bool(group_text) and type_text in grouped_aliases))
 
 
 def extract_cce_business_prefix(name):
