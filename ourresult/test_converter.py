@@ -307,6 +307,9 @@ class BuildGraphAggregationTests(unittest.TestCase):
 
         self.assertIn("function applyGeneratedBdatPositions()", html)
         self.assertIn("applyGeneratedBdatPositions();", html)
+        self.assertIn('id="bdatToggleBtn"', html)
+        self.assertIn("function toggleBdatArchitecture()", html)
+        self.assertIn("_bdatLayerParents", html)
         self.assertRegex(html, re.compile(r'"bdat_x"\s*:\s*[-\d.]+' ))
 
     def test_resource_group_subcontainers_separate_mixed_groups(self):

@@ -2976,6 +2976,7 @@ body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f4f6fb;
   <button class="tb-btn" onclick="exportPng()">&#128247; 导出图片</button>
   <div class="sep"></div>
   <button id="bizToggleBtn" class="tb-btn" onclick="toggleBusinessView()" style="background:rgba(26,188,156,.35)">&#127968; 业务分组:开</button>
+  <button id="bdatToggleBtn" class="tb-btn" onclick="toggleBdatArchitecture()" title="隐藏或显示四层架构框" style="background:rgba(93,109,126,.35)">&#128506; BDAT架构:开</button>
   <button id="lockContainersBtn" class="tb-btn" onclick="toggleContainerLock()" title="锁定或解锁所有业务/层/服务框">&#128274; 锁定容器:关</button>
   <button id="saveLayoutBtn" class="tb-btn" onclick="saveTopologyLayout()" title="保存当前拖拽后的节点位置和视角">&#128190; 保存布局</button>
   <button id="addResourceBtn" class="tb-btn" onclick="openAddNodeEditor()" title="添加资源并生成新节点">&#43; 新增资源</button>
@@ -4010,6 +4011,51 @@ cy.on('position', 'node[type = "__agg_compute__"]', function(evt) {{
 
 var _bizViewOn = true;
 var _origParents = {{}};
+
+// BDAT 架构开关只处理四层架构框。业务框、资源类型框和资源分组框
+// 保持可见；关闭时临时提升层框的直接子节点，避免隐藏父框限制拖动。
+var _bdatArchitectureOn = true;
+var _bdatLayerParents = {{}};
+
+function toggleBdatArchitecture() {{
+  _bdatArchitectureOn = !_bdatArchitectureOn;
+  var btn = document.getElementById('bdatToggleBtn');
+  var layerNodes = cy.nodes('[type = "__layer__"]');
+  var layerEdges = cy.edges('[layer_relation = 1]');
+  if (!_bdatArchitectureOn) {{
+    _bdatLayerParents = {{}};
+    layerNodes.forEach(function(layer) {{
+      var layerId = layer.id();
+      var businessId = layer.data('parent');
+      if (!businessId) return;
+      cy.nodes().forEach(function(node) {{
+        if (node.id() === layerId || node.data('parent') !== layerId) return;
+        _bdatLayerParents[node.id()] = layerId;
+        node.move({{ parent: businessId }});
+      }});
+    }});
+    layerNodes.style('display', 'none');
+    layerEdges.style('display', 'none');
+    btn.innerHTML = '&#128506; BDAT架构:关';
+    btn.style.background = 'rgba(255,255,255,.15)';
+    showToast('四层架构框已隐藏，可自由拖动节点');
+  }} else {{
+    Object.keys(_bdatLayerParents).forEach(function(nodeId) {{
+      var parentId = _bdatLayerParents[nodeId];
+      var node = cy.getElementById(nodeId);
+      if (!node.empty() && !cy.getElementById(parentId).empty()) {{
+        node.move({{ parent: parentId }});
+      }}
+    }});
+    _bdatLayerParents = {{}};
+    layerNodes.style('display', 'element');
+    layerEdges.style('display', 'element');
+    btn.innerHTML = '&#128506; BDAT架构:开';
+    btn.style.background = 'rgba(93,109,126,.35)';
+    showToast('四层架构框已恢复');
+  }}
+  cy.fit(undefined, 50);
+}}
 
 function toggleBusinessView() {{
   _bizViewOn = !_bizViewOn;
