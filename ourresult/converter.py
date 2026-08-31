@@ -305,12 +305,10 @@ def _compact_lower(value):
 def is_cce_deployment_resource(record):
     """Return whether *record* represents a CCE deployment workload.
 
-    Excel exports use several spellings for this resource type.  An explicit
-    ``CCE_Deployment`` type is always a deployment; abbreviated ``cce`` /
-    ``cce_deploym`` values are treated as deployments when they carry a
-    resource-group value.  This preserves the distinction from an ungrouped
-    CCE cluster resource while ensuring grouped deployment rows use only the
-    resource-group aggregation path.
+    Excel exports use several spellings for this resource type.  Only an
+    explicit Deployment type (including normalized aliases), or a resource
+    group that explicitly names ``CCE_Deployment``, enters this path. A plain
+    ``cce`` row with an arbitrary group remains a normal CCE cluster.
     """
     group_text = _compact_lower(
         record.get("group", "")
@@ -321,10 +319,10 @@ def is_cce_deployment_resource(record):
         _compact_lower(record.get(field, ""))
         for field in ("type", "resource_type", "service_type", "service_key")
     }
-    grouped_aliases = {"cce", "ccedeploym", "ccedeploy"}
+    deployment_aliases = {"ccedeployment", "ccedeploym", "ccedeploy"}
     return ("ccedeployment" in group_text
-            or "ccedeployment" in type_texts
-            or (bool(group_text) and bool(type_texts & grouped_aliases)))
+            or bool(type_texts & deployment_aliases)
+            or any(value.startswith("ccedeployment") for value in type_texts))
 
 
 def extract_cce_business_prefix(name):
@@ -749,17 +747,10 @@ def aggregation_signature(entry):
     non-numeric structure of ``resource_name``.
     """
     if is_cce_deployment_resource(entry["record"]):
-        record = entry["record"]
-        group = (
-            record.get("group", "")
-            or record.get("resource_group", "")
-            or entry["data"].get("group_label", "")
-        )
-        # CCE deployments are keyed exclusively by resource-group.  Including
-        # the normalized group in the signature makes this invariant explicit
-        # and prevents a resource_name-based fallback for alternate input
-        # schemas.
-        return "__cce_resource_group__:" + (_compact_lower(group) or "__none__")
+        # The surrounding aggregate key already contains the resource-group
+        # label. Keep a constant signature so resource_name can never split
+        # CCE deployments into separate aggregates.
+        return "__cce_resource_group__"
     return resource_name_signature(entry["data"].get("name", ""))
 
 
@@ -1627,13 +1618,17 @@ def build_graph(records):
                     "border_color": "#7F8C8D",
                     "shape": "roundrectangle",
                 }})
-            cce_service = all(
-                is_cce_deployment_resource(entry["record"])
-                for entry in info
-            )
+            # A service group may contain both CCE_Deployment workloads and
+            # ordinary CCE cluster rows.  Classify each entry independently;
+            # using ``all(...)`` here previously disabled the deployment
+            # resource-group frames whenever one normal CCE row was present.
+            cce_entries = [
+                entry for entry in info
+                if is_cce_deployment_resource(entry["record"])
+            ]
             cce_group_labels = {}
-            if cce_service:
-                for cce_entry in info:
+            if cce_entries:
+                for cce_entry in cce_entries:
                     cce_label = (
                         (cce_entry["data"].get("group_label") or "").strip()
                         or "(未设置资源分组)"
@@ -1679,11 +1674,12 @@ def build_graph(records):
                 meta = agg_meta[agg_key]
                 agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
                 agg_compute_ids[agg_key] = agg_id
+                entry_is_cce = is_cce_deployment_resource(entry["record"])
                 agg_parent = (
                     group_container_ids[
                         (biz_key, meta["layer_key"], svc_key, glabel.casefold())
                     ]
-                    if cce_service else service_container_ids[sc_key]
+                    if entry_is_cce else service_container_ids[sc_key]
                 )
                 agg_compute_nodes.append({"group": "nodes", "data": {
                     "id":              agg_id,

@@ -1016,14 +1016,42 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual({node["name"] for node in groups}, {"group-a", "group-b"})
 
     def test_cce_aggregation_signature_ignores_resource_name(self):
-        first = make_record("completely-different-api-0001", service_type="cce",
+        first = make_record("completely-different-api-0001", service_type="cce_deploym",
                             group="same-group")
-        second = make_record("another-unrelated-worker-9999", service_type="cce",
+        second = make_record("another-unrelated-worker-9999", service_type="cce_deploym",
                              group="same-group")
         entry_template = lambda record: {"record": record, "data": {"name": record["name"], "group_label": record["group"]}}
 
         self.assertEqual(converter.aggregation_signature(entry_template(first)),
                          converter.aggregation_signature(entry_template(second)))
+
+    def test_plain_cce_cluster_does_not_use_deployment_aggregation(self):
+        records = [
+            make_record("cce-cluster-api-0001", service_type="cce", group="K8s集群"),
+            make_record("cce-cluster-api-0002", service_type="cce", group="K8s集群"),
+        ]
+        nodes = element_data(build_graph(records), "nodes")
+        self.assertFalse(any(node.get("type") == "__group__"
+                             and node.get("service_key") == "cce"
+                             for node in nodes))
+
+    def test_mixed_cce_service_group_keeps_deployment_group_frame(self):
+        records = [
+            make_record("deploy-api-0001", service_type="CCE_Deployment",
+                        group="workloads"),
+            make_record("deploy-worker-0002", service_type="CCE_Deployment",
+                        group="workloads"),
+            make_record("cce-cluster-0001", service_type="cce", group="K8s集群"),
+        ]
+        nodes = element_data(build_graph(records), "nodes")
+        deployment_agg = next(node for node in nodes
+                              if node.get("type") == "__agg_compute__"
+                              and node.get("group_label") == "workloads")
+        deployment_frame = next(node for node in nodes
+                                if node.get("type") == "__group__"
+                                and node.get("name") == "workloads")
+        self.assertEqual(deployment_agg["resource_total"], 2)
+        self.assertEqual(deployment_agg["parent"], deployment_frame["id"])
 
     def test_non_cce_aggregates_skip_resource_group_frames(self):
         records = [
