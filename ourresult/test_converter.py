@@ -1025,37 +1025,15 @@ class BuildGraphAggregationTests(unittest.TestCase):
         self.assertEqual(converter.aggregation_signature(entry_template(first)),
                          converter.aggregation_signature(entry_template(second)))
 
-        plain_first = make_record("plain-cluster-a", service_type="cce",
-                                  group="same-group")
-        plain_second = make_record("plain-cluster-b-with-other-shape",
-                                   service_type="cce", group="same-group")
-        plain_entry = lambda record: {
-            "record": record,
-            "data": {
-                "name": record["name"],
-                "group_label": record["group"],
-                "service_key": "cce",
-            },
-        }
-        self.assertEqual(
-            converter.aggregation_signature(plain_entry(plain_first)),
-            converter.aggregation_signature(plain_entry(plain_second)),
-        )
-
     def test_plain_cce_cluster_does_not_use_deployment_aggregation(self):
         records = [
             make_record("cce-cluster-api-0001", service_type="cce", group="K8s集群"),
-            make_record("totally-different-cluster-name", service_type="cce", group="K8s集群"),
+            make_record("cce-cluster-api-0002", service_type="cce", group="K8s集群"),
         ]
         nodes = element_data(build_graph(records), "nodes")
         self.assertFalse(any(node.get("type") == "__group__"
                              and node.get("service_key") == "cce"
                              for node in nodes))
-        aggregates = [node for node in nodes
-                      if node.get("type") == "__agg_compute__"
-                      and node.get("service_key") == "cce"]
-        self.assertEqual(len(aggregates), 1)
-        self.assertEqual(aggregates[0]["resource_total"], 2)
 
     def test_mixed_cce_service_group_keeps_deployment_group_frame(self):
         records = [
@@ -1074,26 +1052,6 @@ class BuildGraphAggregationTests(unittest.TestCase):
                                 and node.get("name") == "workloads")
         self.assertEqual(deployment_agg["resource_total"], 2)
         self.assertEqual(deployment_agg["parent"], deployment_frame["id"])
-
-    def test_cce_deployment_calls_still_aggregate_while_plain_cce_calls_stay_visible(self):
-        records = [
-            make_record("deploy-api-0001", service_type="CCE_Deployment",
-                        group="workloads", targets="rds-target"),
-            make_record("deploy-worker-0002", service_type="CCE_Deployment",
-                        group="workloads"),
-            make_record("cce-cluster-0001", service_type="cce", group="K8s集群",
-                        targets="rds-target"),
-            make_record("rds-target", service_type="rds"),
-        ]
-        nodes = element_data(build_graph(records), "nodes")
-        deployment_aggs = [node for node in nodes
-                           if node.get("type") == "__agg_compute__"
-                           and node.get("group_label") == "workloads"]
-        plain_cce = [node for node in nodes
-                     if node.get("name") == "cce-cluster-0001"]
-        self.assertEqual(len(deployment_aggs), 1)
-        self.assertEqual(deployment_aggs[0]["resource_total"], 2)
-        self.assertEqual(len(plain_cce), 1)
 
     def test_non_cce_aggregates_skip_resource_group_frames(self):
         records = [

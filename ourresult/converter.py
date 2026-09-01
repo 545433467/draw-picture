@@ -742,20 +742,16 @@ def resource_name_signature(value):
 def aggregation_signature(entry):
     """Return the resource identity used inside a resource-group aggregate.
 
-    CCE and CCE_Deployment rows are always aggregated solely by their resource
-    group. Their ``resource_name`` values must never split an aggregate. Other
-    resource types retain the name-structure rule used by the rest of the
-    topology.
+    CCE_Deployment retains its established resource-group aggregation so its
+    deployment details remain together. Other resource types are split by the
+    non-numeric structure of ``resource_name``.
     """
-    record = entry["record"]
-    data = entry.get("data", {})
-    if (data.get("service_key") == "cce"
-            or is_cce_deployment_resource(record)):
+    if is_cce_deployment_resource(entry["record"]):
         # The surrounding aggregate key already contains the resource-group
         # label. Keep a constant signature so resource_name can never split
-        # CCE resources into separate aggregates.
+        # CCE deployments into separate aggregates.
         return "__cce_resource_group__"
-    return resource_name_signature(data.get("name", ""))
+    return resource_name_signature(entry["data"].get("name", ""))
 
 
 def normalize(s):
@@ -899,7 +895,9 @@ def build_graph(records):
 
     entries = []
 
-    project_biz_candidates = defaultdict(list)
+    # 预扫描：收集“已填写所属业务”的 CCE_Deployment 节点所归属的企业项目，
+    # 供未填写所属业务的 CCE 节点按相同企业项目回退并入对应业务分组。
+    project_biz_candidates = defaultdict(list)  # 企业项目(casefold) -> [候选业务]
     for r in records:
         if not is_cce_deployment_resource(r):
             continue
@@ -909,6 +907,9 @@ def build_graph(records):
         )
         if not biz_text or not project_text:
             continue
+        svc_key = get_service_key(
+            r["name"], r["type"], r.get("resource_id"), r.get("group")
+        )
         normalized_biz = canonical_business_name(biz_text)
         biz_key = f"__business__:{normalized_biz or biz_text.casefold()}"
         prefix = extract_cce_business_prefix(r["name"])
@@ -935,13 +936,8 @@ def build_graph(records):
         reg = (r["region"]   or "").strip()
         grp = (r["group"]    or "").strip()
         source_biz = (r["business"] or "").strip()
-        # Explicit CCE Deployment rows must remain CCE even when a resource ID
-        # or group hint would otherwise trigger another service classifier.
-        is_cce_deployment = is_cce_deployment_resource(r)
-        svc_key = forced_service_key or (
-            "cce" if is_cce_deployment else get_service_key(
-                r["name"], stype, r.get("resource_id"), r.get("group")
-            )
+        svc_key = forced_service_key or get_service_key(
+            r["name"], stype, r.get("resource_id"), r.get("group")
         )
         layer_key = get_topology_layer(svc_key, r["name"], stype)
         if (svc_key == "ecs"
@@ -955,13 +951,17 @@ def build_graph(records):
             svc_key, SERVICE_STYLE.get(stype, SERVICE_STYLE["default"])
         )
 
-        # CCE/CCE_Deployment 的业务归属只使用“所属业务”字段；资源分组
-        # 仅用于业务框内的聚合，不再从 resource_name 推断归属。
-        is_cce = is_cce_deployment
+        # CCE_Deployment 资源：业务框仍按“所属业务”字段划分，组内再按
+        # resource_name 前 3 段（前缀）与企业项目（enterprise_id）逐级细分。
+        is_cce = is_cce_deployment_resource(r)
         cce_prefix = extract_cce_business_prefix(r["name"]) if is_cce else ""
         enterprise_project = (
             (r.get("enterprise_project") or r["enterprise_id"] or "").strip()
         )
+        project_label = enterprise_project or "(未设置企业项目)"
+
+        # 未填写所属业务时，退而求其次并入“相同企业项目 + 相同前缀”所在的
+        # 业务分组；多个候选时按该业务内匹配的 CCE 资源数取最多者。
         fallback_biz_key = ""
         fallback_biz_label = ""
         if is_cce and not source_biz and enterprise_project and cce_prefix:
@@ -1317,41 +1317,20 @@ def build_graph(records):
     for entry in entries:
         service_groups[entry["group_key"]].append(entry)
 
-    # CCE rows with confirmed incoming or outgoing calls stay as individual
-    # nodes.  All other CCE rows, including every CCE_Deployment row, are
-    # collapsed by resource group.  This decision deliberately uses only
-    # service type, calls and resource-group; resource_name is not involved.
-    referenced_names = {
-        name_key(target_name)
-        for entry in entries
-        for target_name in split_target_names(entry["record"].get("targets", ""))
-    }
-
-    def is_cce_service_entry(entry):
-        return entry["data"].get("service_key") == "cce"
-
-    def entry_has_confirmed_call(entry):
-        record = entry["record"]
-        return bool(split_target_names(record.get("targets", ""))) or (
-            name_key(entry["data"].get("name", "")) in referenced_names
-        )
-
     visible_indexes = set()
     group_info = {}
     for group_index, (group_key, group_entries) in enumerate(service_groups.items()):
         biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
             group_key
         )
-        if svc_key == "cce":
-            visible_entries = [
-                entry for entry in group_entries
-                if not is_cce_deployment_resource(entry["record"])
-                and entry_has_confirmed_call(entry)
-            ]
-            hidden_entries = [
-                entry for entry in group_entries
-                if entry not in visible_entries
-            ]
+        # 所有受支持资源均由“资源分组”聚合为单个缩略节点，不逐个渲染。
+        is_cce_group = bool(group_entries) and all(
+            is_cce_deployment_resource(entry["record"])
+            for entry in group_entries
+        )
+        if is_cce_group:
+            visible_entries = []
+            hidden_entries = list(group_entries)
         elif svc_key != "default":
             visible_entries = []
             hidden_entries = []
@@ -1405,14 +1384,15 @@ def build_graph(records):
     # 以便体现摘要节点归属的资源分组；摘要节点承接组内隐藏资源的连线。
     summary_counter = [0]
     for group_key, info in group_info.items():
-        biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
-            group_key
-        )
         hidden_entries = info["hidden"]
         if not hidden_entries:
             continue
-        if svc_key == "cce":
+        if all(is_cce_deployment_resource(entry["record"])
+               for entry in info["entries"]):
             continue
+        biz_key, layer_key, svc_key, prefix_key, project_key = split_group_key(
+            group_key
+        )
         sample_data = info["entries"][0]["data"]
         bg, border, _ = SERVICE_STYLE.get(svc_key, SERVICE_STYLE["default"])
         hidden_by_group = defaultdict(list)
@@ -1575,10 +1555,6 @@ def build_graph(records):
             group_key
         )
         for entry in info:
-            if (is_cce_service_entry(entry)
-                    and not is_cce_deployment_resource(entry["record"])
-                    and entry_has_confirmed_call(entry)):
-                continue
             glabel = (
                 (entry["data"].get("group_label") or "").strip()
                 or "(未设置资源分组)"
@@ -1649,7 +1625,6 @@ def build_graph(records):
             cce_entries = [
                 entry for entry in info
                 if is_cce_deployment_resource(entry["record"])
-                or entry_has_confirmed_call(entry)
             ]
             cce_group_labels = {}
             if cce_entries:
@@ -1688,25 +1663,6 @@ def build_graph(records):
                     "shape": "roundrectangle",
                 }})
             for entry in info:
-                if (is_cce_service_entry(entry)
-                        and not is_cce_deployment_resource(entry["record"])
-                        and entry_has_confirmed_call(entry)):
-                    group_key_for_node = (
-                        (entry["data"].get("group_label") or "").strip()
-                        or "(未设置资源分组)"
-                    ).casefold()
-                    cce_group_id = group_container_ids.get(
-                        (biz_key, layer_key, svc_key, group_key_for_node)
-                    )
-                    node = node_by_id.get(entry["data"]["id"])
-                    if node and cce_group_id:
-                        node["data"]["parent"] = cce_group_id
-                        node["data"]["group_container"] = cce_group_id
-                        node["data"]["service_container"] = service_container_ids[sc_key]
-                        node["data"]["layer_container"] = layer_map.get(
-                            (biz_key, layer_key), ""
-                        )
-                    continue
                 glabel = (
                     (entry["data"].get("group_label") or "").strip()
                     or "(未设置资源分组)"
@@ -1718,10 +1674,7 @@ def build_graph(records):
                 meta = agg_meta[agg_key]
                 agg_id = f"aggc_{biz_id}_{len(agg_compute_ids)}"
                 agg_compute_ids[agg_key] = agg_id
-                entry_is_cce = (
-                    is_cce_deployment_resource(entry["record"])
-                    or entry_has_confirmed_call(entry)
-                )
+                entry_is_cce = is_cce_deployment_resource(entry["record"])
                 agg_parent = (
                     group_container_ids[
                         (biz_key, meta["layer_key"], svc_key, glabel.casefold())
@@ -1905,10 +1858,6 @@ def build_graph(records):
 
     def internal_endpoint(entry):
         """同业务边保留可见节点；隐藏节点由摘要节点承接。"""
-        if (is_cce_service_entry(entry)
-                and not is_cce_deployment_resource(entry["record"])
-                and entry_has_confirmed_call(entry)):
-            return entry["data"]["id"]
         if entry["data"]["service_key"] != "default":
             gkey = (
                 (entry["data"].get("group_label") or "").strip().casefold()
@@ -1931,10 +1880,6 @@ def build_graph(records):
 
     def representative_endpoint(entry):
         """跨业务边统一落到对应服务组的第一个真实资源节点。"""
-        if (is_cce_service_entry(entry)
-                and not is_cce_deployment_resource(entry["record"])
-                and entry_has_confirmed_call(entry)):
-            return entry["data"]["id"]
         if entry["data"]["service_key"] != "default":
             gkey = (
                 (entry["data"].get("group_label") or "").strip().casefold()
