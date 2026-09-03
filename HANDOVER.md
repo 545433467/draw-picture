@@ -100,11 +100,25 @@ py ourresult\converter.py ourresult\sample.xlsx
 (业务键, 资源分组, 架构层, 服务键, 聚合签名)
 ```
 
-- 普通资源的聚合签名是 `resource_name` 的非数字结构：连续数字统一替换为 `#`，其他字符必须完全一致。因此 `ecs-web-01` 与 `ecs-web-02` 可合并，`ecs-pd-0001` 与 `ecs-db-0001` 不合并。
-- CCE_Deployment 的聚合签名固定为 `__cce_resource_group__`，所以同一业务、同一层、同一服务键、同一“资源分组”的 Deployment 无论名称如何都会合并成一个 `...+N` 摘要节点。
-- 普通 CCE 集群（例如类型为 `cce`、资源分组为 `K8s集群`，但不是 Deployment 别名）不使用 Deployment 专用规则；它按普通服务的名称签名聚合。
-- 所有受支持服务类型都会生成聚合摘要节点和数字徽标；摘要节点的 `summary_resources` 保留全部明细。CCE_Deployment 还会保留“资源分组”二级框，摘要节点挂在该框下；普通 ECS/RDS 等不额外创建资源分组框，除非同一服务框内存在多个分组值，此时会创建分组小框以隔离布局。
+- 聚合先按业务、架构层、服务键和资源分组隔离，再应用不同服务类型的“聚合签名”。因此相同名称但业务、层、服务类型或资源分组不同，永远不会合并。
+- 普通资源（包括 ECS、BMS、ELB/SLB、WAF、RDS、DCS/Redis、OBS/OSS、NAT、VPC 等）的签名是 `resource_name` 的非数字结构：连续数字统一替换为 `#`，其他字符必须完全一致。`ecs-web-01` 与 `ecs-web-02` 会合并；`ecs-web-01` 与 `ecs-db-01` 不会合并；`elb-api-1` 与 `elb-api-2` 的处理方式与 ECS 相同。
+- CCE_Deployment（包括 `CCE_Deployment`、`cce_deploym` 等类型别名，或资源分组明确写成 `CCE_Deployment` 的行）的签名固定为 `__cce_resource_group__`。同一业务、同一架构层、同一服务键、同一资源分组下，`deploy-api-001` 和 `deploy-worker-999` 也会合并为一个 `...+N` 聚合节点，名称结构不会再拆分该组。
+- 普通 CCE 集群必须与 Deployment 分开理解：类型为 `cce` 且不是 Deployment 别名时，按普通资源的名称签名聚合。例如同组的 `cce-cluster-api-01/02` 可合并；名称非数字结构不同的两个集群会得到两个聚合节点。普通 CCE 不创建 Deployment 专用的资源分组框。
+- CCE 与普通资源的展示层级也不同：CCE_Deployment 会创建“服务框 → 资源分组框 → `...+N` 聚合节点”；ECS、ELB 等通常是“服务框 → `...+N` 聚合节点”。如果普通服务框内存在多个资源分组值，系统只为布局隔离创建分组小框，不改变普通资源按名称签名拆分的规则。
+- 一个服务框中混有普通 CCE 和 CCE_Deployment 时，代码按行独立判定：Deployment 仍进入对应资源分组框，普通 CCE 仍挂在 CCE 服务框下，不会因为混合数据而关闭 Deployment 分组框。
+- 企业项目名称/ID和 CCE 名称前缀不是当前聚合元组的一部分。它们只用于“未填写所属业务的 CCE_Deployment”回退业务匹配（相同企业项目 + 相同前缀），并保留在明细详情中；一旦业务归属确定，同一业务内不同企业项目不会自动拆成不同聚合节点，除非资源分组、层、服务键或名称签名不同。
+- 所有受支持服务类型都会生成 `__agg_compute__` 聚合节点和数字徽标；原始资源完整保存在 `summary_resources` 中。`default/Other` 记录会在聚合前过滤，不会产生 Other 聚合。
 - 空资源分组统一显示为“(未设置资源分组)”。不同业务、架构层或服务类型之间不会合并同名分组。
+
+#### 按类型对照
+
+| 资源类型 | 聚合签名 | 资源分组框 | 示例结果 |
+| --- | --- | --- | --- |
+| `CCE_Deployment` / Deployment 别名 | 固定值 `__cce_resource_group__`，不看名称结构 | 保留，按资源分组一组一个框 | 同组 20 个不同名称 → 一个 `...+20` |
+| 普通 `CCE` 集群 | `resource_name` 替换数字后的签名 | 不使用 Deployment 专用框 | `cce-api-01/02` → `...+2`；`cce-api-*` 与 `cce-worker-*` → 两组 |
+| `ECS`、`ELB/SLB`、`RDS` 等普通服务 | 同上，按非数字名称结构 | 默认不保留 CCE 式分组框；多分组时可生成布局隔离小框 | 同组同结构合并，不同结构拆分 |
+
+聚合节点承接调用关系：同业务调用落到对应聚合节点；跨业务调用落到源/目标服务组的代表聚合节点；多条相同端点合并并递增 `call_count`。
 
 ### 4.5 调用边归并
 
@@ -178,4 +192,3 @@ py -3 ourresult\converter.py ourresult\sample.xlsx ourresult\handover-smoke.html
 - [ ] 核心业务列是否存在已确认；该列一旦存在，非“是”行会被完全过滤。
 - [ ] 下游服务只填写已确认关系；推断信息放入“下游服务(推断)”和“推断原因”。
 - [ ] HTML 能直接打开，且保存布局/导出文件的浏览器权限符合使用场景。
-
